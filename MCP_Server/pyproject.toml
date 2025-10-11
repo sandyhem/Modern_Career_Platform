@@ -1,0 +1,19 @@
+[project]
+name = "mcp-server"
+version = "0.1.0"
+description = "This is the project developed for Ada Lovelace Hackathon."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.12.15",
+    "aiomysql>=0.2.0",
+    "fastapi>=0.118.0",
+    "fastmcp>=2.12.4",
+    "langgraph>=0.6.8",
+    "mcp>=1.16.0",
+    "pymongo>=4.15.2",
+    "python-dotenv>=1.1.1",
+    "sqlalchemy>=2.0.43",
+    "sqlparse>=0.5.3",
+    "unicorn[standard]>=2.1.4",
+]
