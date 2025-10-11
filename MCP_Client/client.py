@@ -11,6 +11,10 @@ from typing import Annotated
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from fastapi import HTTPException
+from bson import ObjectId
+from pymongo import MongoClient
+
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -626,6 +630,93 @@ async def evaluate_job_description(
                     "status": "error",
                     "message": f"Failed to evaluate JD compatibility: {str(e)}",
                 }
+
+from typing import Optional, List
+
+client = MongoClient("mongodb://localhost:27017/")
+db = client["studentDB"]
+students_collection = db["students"]
+
+class Student(BaseModel):
+    name: str
+    regno: str
+    degree: str
+    branch: str
+    cgpa: float
+    location: str
+    expected_graduation_year: int
+    university: str
+    github_username: str
+    leetcode_username: str
+    codeforces_username: Optional[str] = None
+    linkedin_username: str
+    resume_url: str
+
+class StudentOut(BaseModel):
+    id: str
+    name: str
+    regno: str
+    degree: str
+    branch: str
+    cgpa: float
+    location: str
+    expected_graduation_year: int
+    university: str
+    github_username: str
+    leetcode_username: str
+    codeforces_username: Optional[str] = None
+    linkedin_username: str
+    resume_url: str
+
+def student_serializer(student) -> dict:
+    return {
+        "id": str(student["_id"]),
+        "name": student["name"],
+        "regno": student["regno"],
+        "degree": student["degree"],
+        "branch": student["branch"],
+        "cgpa": student["cgpa"],
+        "location": student["location"],
+        "expected_graduation_year": student["expected_graduation_year"],
+        "university": student["university"],
+        "github_username": student["github_username"],
+        "leetcode_username": student["leetcode_username"],
+        "codeforces_username": student.get("codeforces_username"),
+        "linkedin_username": student["linkedin_username"],
+        "resume_url": student["resume_url"]
+    }
+
+@app.post("/students")
+def create_student(student: Student):
+    result = students_collection.insert_one(student.dict())
+    return {"id": str(result.inserted_id)}
+
+@app.get("/students", response_model=List[StudentOut])
+def get_students():
+    students = students_collection.find()
+    return [student_serializer(s) for s in students]
+
+@app.get("/students/{student_id}", response_model=StudentOut)
+def get_student(student_id: str):
+    student = students_collection.find_one({"_id": ObjectId(student_id)})
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return student_serializer(student)
+
+@app.put("/students/{student_id}")
+def update_student(student_id: str, student: Student):
+    result = students_collection.update_one({"_id": ObjectId(student_id)}, {"$set": student.dict()})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return {"message": "Student updated successfully"}
+
+@app.delete("/students/{student_id}")
+def delete_student(student_id: str):
+    result = students_collection.delete_one({"_id": ObjectId(student_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return {"message": "Student deleted successfully"}
+
 
 if __name__ == "__main__":
     import uvicorn

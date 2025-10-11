@@ -1,2 +1,10 @@
 uv
 dotenv
+fastapi[standard]
+mcp
+langchain
+langchain_mcp_adapters
+langgraph
+langchain_google_genai
+
+pymongo

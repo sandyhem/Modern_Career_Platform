@@ -51,8 +51,6 @@ venv\Scripts\activate
 # Install base requirements
 pip install -r requirements.txt
 
-# Install additional packages with UV
-uv add fastapi fastmcp sqlalchemy python-dotenv sqlparse unicorn[standard] aiomysql aiohttp mcp langgraph
 ```
 
 ## Usage
@@ -61,6 +59,10 @@ uv add fastapi fastmcp sqlalchemy python-dotenv sqlparse unicorn[standard] aiomy
 ```powershell
 # Navigate to MCP_Server directory
 cd MCP_Server
+
+
+uv add fastapi fastmcp sqlalchemy python-dotenv sqlparse unicorn[standard] aiomysql aiohttp mcp langgraph
+
 
 # Run the MCP server
 uv run mcp_mounter.py
@@ -77,6 +79,7 @@ npx @modelcontextprotocol/inspector
 cd MCP_Client
 
 # Run the MCP server
+
 fastapi run client.py
 ```
 

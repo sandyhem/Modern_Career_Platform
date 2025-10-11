@@ -17,8 +17,10 @@ from pydantic import BaseModel
 import google.generativeai as genai
 import os
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+from dotenv import load_dotenv
+load_dotenv()
 
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 app = FastAPI(
     title="GitHub MCP Server",
     description="Fetches all GitHub data (profile, repos, orgs, gists, events) for a user",
@@ -705,14 +707,14 @@ def gemini_keyword_match(username: str, jd: str = Body(..., embed=True), token: 
         """
 
         # Call Gemini API
-        if not os.getenv("GEMINI_API_KEY"):
+        if not os.getenv("GOOGLE_API_KEY"):
             return {
                 "username": username,
-                "error": "Gemini API key not configured",
-                "message": "Set GEMINI_API_KEY environment variable"
+                "error": "GOOGLE API key not configured",
+                "message": "Set GOOGLE_API_KEY environment variable"
             }
 
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
 
         return {
@@ -734,6 +736,95 @@ def gemini_keyword_match(username: str, jd: str = Body(..., embed=True), token: 
             "suggestion": "Check if username exists and Gemini API key is properly set"
         }
 
+
+HEADERS = {"Accept": "application/vnd.github+json"}
+
+@app.get("/analyze_candidate")
+def analyze_candidate(username: str, job_description: str, pat_token: str = Query(..., description="GitHub Personal Access Token")):
+    HEADERS = {"Authorization": f"token {pat_token}"}
+
+    # Fetch user profile and repos
+    profile_res = requests.get(f"{GITHUB_API_BASE}/users/{username}", headers=HEADERS)
+    if profile_res.status_code != 200:
+        return {"error": f"Failed to fetch profile: {profile_res.status_code}"}
+    profile = profile_res.json()
+
+    repos_res = requests.get(f"{GITHUB_API_BASE}/users/{username}/repos?per_page=100", headers=HEADERS)
+    if repos_res.status_code != 200:
+        return {"error": f"Failed to fetch repos: {repos_res.status_code}"}
+    repos = repos_res.json()
+
+    # GitHub stats for UI
+    total_repos = len(repos)
+    total_stars = sum(r.get("stargazers_count", 0) for r in repos)
+    total_forks = sum(r.get("forks_count", 0) for r in repos)
+    total_watchers = sum(r.get("watchers_count", 0) for r in repos)
+    followers = profile.get("followers", 0)
+
+    github_stats = {
+        "total_repos": total_repos,
+        "total_stars": total_stars,
+        "total_forks": total_forks,
+        "total_watchers": total_watchers,
+        "followers": followers
+    }
+
+    # Calculate total commits (estimation via commits API per repo)
+    total_commits = 0
+    for repo in repos:
+        repo_name = repo.get("name")
+        owner = repo.get("owner", {}).get("login")
+        commits_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo_name}/commits"
+        commits_res = requests.get(commits_url, headers=HEADERS, params={"per_page": 1})
+        if commits_res.status_code != 200:
+            continue
+        link_header = commits_res.headers.get("Link")
+        if link_header and 'rel="last"' in link_header:
+            last_page = int(link_header.split("page=")[-1].split(">")[0])
+            total_commits += last_page
+        else:
+            total_commits += len(commits_res.json())
+
+    # --- Languages per repo ---
+    lang_totals = {}
+    for repo in repos:
+        lang_url = repo.get("languages_url")
+        lang_res = requests.get(lang_url, headers=HEADERS)
+        if lang_res.status_code != 200:
+            continue
+        lang_data = lang_res.json()
+        for lang, bytes_count in lang_data.items():
+            lang_totals[lang] = lang_totals.get(lang, 0) + bytes_count
+
+    total_bytes = sum(lang_totals.values()) or 1
+    language_weights = {k: v / total_bytes for k, v in lang_totals.items()}
+
+    # --- Match job description keywords ---
+    jd_keywords = job_description.lower().split()
+    matched_langs = [lang for lang in language_weights if any(k in lang.lower() for k in jd_keywords)]
+    match_score = sum(language_weights.get(lang, 0) for lang in matched_langs)
+
+    # --- GitHub proficiency based on commits ---
+    proficiency = min(1, (total_commits / 100) / 10)  # scale commits to 0-1
+
+    # --- Final compatibility score ---
+    compatibility_score = round((0.7 * match_score + 0.3 * proficiency) * 100, 2)
+
+    return {
+        "username": username,
+        "job_description_preview": job_description[:200] + "..." if len(job_description) > 200 else job_description,
+        "languages": lang_totals,
+        "matched_keywords": matched_langs,
+        "github_activity": {
+            "total_commits": total_commits,
+            "total_repos": total_repos,
+            "total_stars": total_stars,
+            "total_forks": total_forks,
+            "total_watchers": total_watchers,
+            "followers": followers
+        },
+        "compatibility_score": compatibility_score
+    }
 
 @app.get("/health")
 def health_check():
