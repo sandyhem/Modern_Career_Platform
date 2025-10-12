@@ -3,7 +3,8 @@ import httpx
 import asyncio      
 from datetime import datetime, timezone
 from mcp.server.fastmcp import FastMCP
-from fastapi import HTTPException, requests
+from fastapi import HTTPException
+import requests
 
 GITHUB_API = "https://api.github.com"
 
@@ -167,22 +168,23 @@ async def safe_get(url: str):
     except:
         return None
 
-# Compute LeetCode score
-async def compute_leetcode_score(username: str):
-    url = f"https://leetcode-stats-api.herokuapp.com/{username}"
-    data = await safe_get(url)
-    if not data or "totalSolved" not in data:
-        raise HTTPException(status_code=404, detail="Invalid LeetCode username")
+# # Compute LeetCode score
+# async def compute_leetcode_score(username: str):
+#     url = f"https://leetcode-stats-api.herokuapp.com/{username}"
+#     data = await safe_get(url)
+#     print(data)
+#     if not data or "totalSolved" not in data:
+#         raise HTTPException(status_code=404, detail="Invalid LeetCode username")
 
-    total = data.get("totalSolved", 0)
-    ranking = data.get("ranking", 100000)
-    acceptance = data.get("acceptanceRate", 0)
+#     total = data.get("totalSolved", 0)
+#     ranking = data.get("ranking", 100000)
+#     acceptance = data.get("acceptanceRate", 0)
 
-    problems_score = min(500, math.log10(total + 1) / math.log10(3000) * 500)
-    contest_score = (1 - min(1, ranking / 100000)) * 300
-    accuracy_score = min(1, acceptance / 100) * 200
+#     problems_score = min(500, math.log10(total + 1) / math.log10(3000) * 500)
+#     contest_score = (1 - min(1, ranking / 100000)) * 300
+#     accuracy_score = min(1, acceptance / 100) * 200
 
-    return round(problems_score + contest_score + accuracy_score, 2), data
+#     return round(problems_score + contest_score + accuracy_score, 2), data
 
 # Generate remarks
 def remark(final_score: float):
@@ -195,24 +197,25 @@ def remark(final_score: float):
     else:
         return "Elite: top-tier algorithmic problem solver!"
 
-# MCP tool: fetch LeetCode details and evaluate
-@mcp.tool(description="Fetch LeetCode user details and evaluate candidate")
-async def evaluate_leetcode_user(leetcode_username: str):
-    """
-    Fetches LeetCode stats for the given username and computes a final score with remarks.
-    Returns detailed stats and evaluation.
-    """
-    try:
-        score, data = await compute_leetcode_score(leetcode_username)
-    except HTTPException as e:
-        return {"error": str(e.detail)}
+# # MCP tool: fetch LeetCode details and evaluate
+# @mcp.tool(description="Fetch LeetCode user details and evaluate candidate")
+# async def evaluate_leetcode_user(leetcode_username: str):
+#     """
+#     Fetches LeetCode stats for the given username and computes a final score with remarks.
+#     Returns detailed stats and evaluation.
+#     """
+#     try:
+#         score, data = await compute_leetcode_score(leetcode_username)
+#     except HTTPException as e:
+#         return {"error": str(e.detail)}
 
-    return {
-        "username": leetcode_username,
-        "final_score": score,
-        "remarks": remark(score),
-        "leetcode_details": data
-    }
+#     return {
+#         "username": leetcode_username,
+#         "final_score": score,
+#         "remarks": remark(score),
+#         "leetcode_details": data
+#     }
+
 
 # Compute Codeforces score
 async def compute_codeforces_score(handle: str):
@@ -255,4 +258,138 @@ async def evaluate_codeforces_user(codeforces_handle: str):
         "remarks": remark(score),
         "codeforces_details": data
     }
+
+LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
+
+
+@mcp.tool(description="Fetch LeetCode user details and evaluate candidate")
+async def evaluate_leetcode_user(username: str):
+    """
+    Fetches LeetCode user stats including solved problems, contest ranking, and badges.
+    """
+
+    query = """
+    query getUserStats($username: String!) {
+      matchedUser(username: $username) {
+        username
+        profile {
+          realName
+          ranking
+          reputation
+          userAvatar
+          countryName
+        }
+        submitStatsGlobal {
+          acSubmissionNum {
+            difficulty
+            count
+            submissions
+          }
+          totalSubmissionNum {
+            count
+          }
+        }
+        badges {
+          id
+          name
+          icon
+          creationDate
+        }
+      }
+      userContestRanking(username: $username) {
+        attendedContestsCount
+        rating
+        globalRanking
+        totalParticipants
+        topPercentage
+      }
+    }
+    """
+
+    variables = {"username": username}
+
+    try:
+        # ❗️requests is synchronous — use asyncio.to_thread to avoid blocking
+        import asyncio
+        response = await asyncio.to_thread(
+            requests.post,
+            LEETCODE_GRAPHQL_URL,
+            json={"query": query, "variables": variables},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (MCP-Agent)"
+            },
+            timeout=10
+        )
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
+
+    # Check HTTP status
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail="Failed to fetch data from LeetCode"
+        )
+
+    data = response.json()
+
+    # Validate response
+    if "errors" in data or not data.get("data") or not data["data"].get("matchedUser"):
+        raise HTTPException(
+            status_code=404,
+            detail="User not found or profile is private"
+        )
+
+    user_data = data["data"]["matchedUser"]
+    contest_data = data["data"].get("userContestRanking", {})
+
+    # 🧠 Extract problem stats
+    ac_stats = {
+        d["difficulty"]: d["count"]
+        for d in user_data["submitStatsGlobal"]["acSubmissionNum"]
+    }
+    total_solved = sum(ac_stats.values())
+
+    # 🐛 FIX: totalSubmissionNum is a list of dicts, so iterate properly
+    total_submissions = 0
+    for d in user_data["submitStatsGlobal"]["totalSubmissionNum"]:
+        total_submissions += d["count"]
+
+    # ✅ Compute acceptance rate safely
+    acceptance_rate = round((total_solved / total_submissions) * 100, 2) if total_submissions > 0 else 0.0
+
+    # 🧩 Combine results
+    result = {
+        "username": user_data["username"],
+        "realName": user_data["profile"].get("realName"),
+        "country": user_data["profile"].get("countryName"),
+        "ranking": user_data["profile"].get("ranking"),
+        "avatar": user_data["profile"].get("userAvatar"),
+        "reputation": user_data["profile"].get("reputation"),
+        "problemsSolved": {
+            "Total": total_solved,
+            "Easy": ac_stats.get("Easy", 0),
+            "Medium": ac_stats.get("Medium", 0),
+            "Hard": ac_stats.get("Hard", 0),
+            "AcceptanceRate": f"{acceptance_rate}%",
+        },
+        "contestStats": {
+            "AttendedContests": contest_data.get("attendedContestsCount"),
+            "Rating": contest_data.get("rating"),
+            "GlobalRanking": contest_data.get("globalRanking"),
+            "TotalParticipants": contest_data.get("totalParticipants"),
+            "TopPercentage": contest_data.get("topPercentage"),
+        },
+        "badges": [
+            {
+                "id": badge.get("id"),
+                "name": badge.get("name"),
+                "icon": badge.get("icon"),
+                "earnedOn": badge.get("creationDate")
+            }
+            for badge in user_data.get("badges", [])
+        ]
+    }
+
+    return result
 

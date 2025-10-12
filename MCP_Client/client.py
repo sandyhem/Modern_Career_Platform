@@ -530,7 +530,7 @@ async def get_leetcode_score(username: str):
             # Call the tool
             response = await session.call_tool(
                 tool_name,
-                {"leetcode_username": username}
+                {"username": username}
             )
 
             # Access attributes properly (not subscripting)
