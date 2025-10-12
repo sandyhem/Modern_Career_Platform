@@ -6,11 +6,11 @@ import httpx
 from fastapi import Body, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Annotated
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-
+from datetime import datetime
 from fastapi import HTTPException
 from bson import ObjectId
 from pymongo import MongoClient
@@ -717,6 +717,92 @@ def delete_student(student_id: str):
         raise HTTPException(status_code=404, detail="Student not found")
     return {"message": "Student deleted successfully"}
 
+# ------------------------------
+# Pydantic Models
+# ------------------------------
+recruitment_db = client["recruitmentDB"]
+jobs_collectiontwo = recruitment_db["jobs"]
+
+class Job(BaseModel):
+    title: str
+    type: str = Field(default="Full-Time")
+    department: str
+    location: str
+    postDate: datetime = Field(default_factory=datetime.utcnow)
+    endDate: Optional[datetime] = None
+    responsibilities: str
+    qualifications: str
+    skills: str
+
+class JobOut(BaseModel):
+    id: str
+    title: str
+    type: str
+    department: str
+    location: str
+    postDate: datetime
+    endDate: Optional[datetime]
+    responsibilities: str
+    qualifications: str
+    skills: str
+
+# ------------------------------
+# Serializer
+# ------------------------------
+
+def job_serializer(job) -> dict:
+    return {
+        "id": str(job["_id"]),
+        "title": job["title"],
+        "type": job["type"],
+        "department": job["department"],
+        "location": job["location"],
+        "postDate": job["postDate"],
+        "endDate": job.get("endDate"),
+        "responsibilities": job["responsibilities"],
+        "qualifications": job["qualifications"],
+        "skills": job["skills"],
+    }
+
+# ------------------------------
+# CRUD Endpoints
+# ------------------------------
+
+@app.post("/jobs")
+def create_job(job: Job):
+    """Create a new job post"""
+    result = jobs_collectiontwo.insert_one(job.dict())
+    return {"id": str(result.inserted_id), "message": "Job created successfully"}
+
+@app.get("/jobs", response_model=List[JobOut])
+def get_jobs():
+    """Get all job posts"""
+    jobs = jobs_collectiontwo.find()
+    return [job_serializer(j) for j in jobs]
+
+@app.get("/jobs/{job_id}", response_model=JobOut)
+def get_job(job_id: str):
+    """Get a specific job by ID"""
+    job = jobs_collectiontwo.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job_serializer(job)
+
+@app.put("/jobs/{job_id}")
+def update_job(job_id: str, job: Job):
+    """Update an existing job"""
+    result = jobs_collectiontwo.update_one({"_id": ObjectId(job_id)}, {"$set": job.dict()})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job updated successfully"}
+
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: str):
+    """Delete a job"""
+    result = jobs_collectiontwo.delete_one({"_id": ObjectId(job_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
