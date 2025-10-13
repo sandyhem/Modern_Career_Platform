@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Annotated
 from typing import Dict, List, Optional
+
+from requests import session
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -534,7 +536,6 @@ async def get_leetcode_score(username: str):
                     "raw_text": content_text
                 }
 
-
 @app.post("/evaluate/jdmatch")
 async def evaluate_job_description(
     username: Annotated[str, Query(description="GitHub username or coding profile name")],
@@ -639,12 +640,150 @@ async def evaluate_job_description(
                 })
 
 
+import re
+import ast
+
+
+class QueryRequest(BaseModel):
+    query: str  # natural language query
+
+# ------------------ Helper function ------------------
+def clean_llm_output(text: str) -> dict:
+    """
+    Convert LLM output (possibly wrapped in Markdown) into a Python dict.
+    """
+    # Remove code fences
+    text = re.sub(r"```(?:python)?\n?", "", text)
+    text = re.sub(r"```", "", text)
+    text = text.strip()
+
+    try:
+        # Safely parse dict from string
+        return ast.literal_eval(text)
+    except Exception as e:
+        raise ValueError(f"Cannot convert LLM output to dict: {e}\nOutput: {text}")
+
+# ------------------ Endpoint ------------------
+@app.post("/mongoreader/")
+async def mongodb_query(request: QueryRequest):
+    user_query = request.query
+    print("Query from body:", user_query)
+
+    # Step 1: Connect to MCP Server
+    async with streamablehttp_client("http://localhost:10000/db/mcp") as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+
+            # Load MCP tools, prompts, resources
+            tools = await load_mcp_tools(session)
+            prompts = await session.list_prompts()
+            resources = await session.list_resources()
+
+            # Load schema resource
+            resource_name = "schema://jobapplicants"
+            resource_content = await session.read_resource(resource_name)
+            schema_text = resource_content.contents[0].text
+            print(f"\nResource '{resource_name}' schema JSON:\n", schema_text)
+
+            # Load translation prompt
+            prompt_name = "translate_query_prompt"
+            prompt_content = await session.get_prompt(prompt_name)
+            prompt_text = prompt_content.messages[0].content.text
+            print(f"\nPrompt '{prompt_name}' text:\n", prompt_text)
+
+            # Step 2: Initialize Gemini LLM
+            load_dotenv()
+            google_api_key = os.getenv("GOOGLE_API_KEY")
+
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                temperature=0.3,
+                max_retries=2,
+                google_api_key=google_api_key,
+            )
+
+            # Step 3: Create LangGraph Agent
+            agent = create_react_agent(llm, tools)
+
+            # Step 4: Build full prompt
+            full_prompt = f"""
+            schema:
+            {schema_text}
+            query:
+            {user_query}
+            prompt:
+            You are a MongoDB query translator. Your task is to convert natural language questions into valid MongoDB query filters (Python dict format).
+            **SCHEMA REFERENCE:**
+            Use the schema from resource to understand available fields and their types.
+
+            **TRANSLATION RULES:**
+            1. Output ONLY a valid Python dictionary that can be used with pymongo's find() method
+            2. Use MongoDB query operators: $gt, $lt, $gte, $lte, $eq, $ne, $in, $nin, $and, $or, $regex, $exists
+            3. For text searches, use case-insensitive regex: {{"field": {{"$regex": "pattern", "$options": "i"}}}}
+            4. For array fields (like skills), use $in or $all operators
+            5. Combine multiple conditions using $and or $or
+            6. For date comparisons, use ISO format strings or ISODate syntax
+            7. Return empty dict for queries requesting all documents
+
+            **EXAMPLES:**
+
+            Query: "Find applicants with github score above 0.8"
+            Output: {{"github_match_score": {{"$gt": 0.8}}}}
+
+            Query: "Show me Python developers in pending status"
+            Output: {{"$and": [{{"skills": {{"$regex": "python", "$options": "i"}}}}, {{"status": "pending"}}]}}
+
+            Query: "Applicants with more than 5 years experience and overall score >= 0.7"
+            Output: {{"$and": [{{"experience_years": {{"$gt": 5}}}}, {{"overall_score": {{"$gte": 0.7}}}}]}}
+
+            Query: "Find candidates who applied for Senior Developer or Tech Lead positions"
+            Output: {{"applied_position": {{"$in": ["Senior Developer", "Tech Lead"]}}}}
+
+            **YOUR TASK:**
+            Translate the following natural language query into a MongoDB filter dictionary:
+            After generating filter, immediately call the tool `execute_query` with description "Execute a MongoDB query and return results" as output.
+            Use the query result and give the enhanced response to the user.
+            """
+
+            print("📤 Sending query to Gemini...")
+
+            try:
+                # Step 5: Ask LLM to translate query
+                messages = [{"role": "user", "content": full_prompt}]
+                response = await agent.ainvoke({"messages": messages})
+
+                # Extract final text from agent
+                final_output = None
+                if isinstance(response, dict) and response.get("messages"):
+                    last_msg = response["messages"][-1]
+                    final_output = getattr(last_msg, "content", None) or (last_msg.get("content") if isinstance(last_msg, dict) else None)
+                if not final_output:
+                    final_output = response.get("text") if isinstance(response, dict) else str(response)
+
+                print("LLM output:\n", final_output)
+
+                return final_output
+
+            except Exception as e:
+                error_msg = f"Failed to run agent: {str(e)}"
+                print(f"❌ MongoDB Query failed: {error_msg}")
+                return JSONResponse(status_code=500, content={
+                    "status": "error",
+                    "message": error_msg
+                })
+
+
+
+
+        
+
 
 client = MongoClient("mongodb://localhost:27017/")
 db = client["studentDB"]
 students_collection = db["students"]
 
 class Student(BaseModel):
+    sid:str
     name: str
     regno: str
     degree: str
@@ -662,7 +801,7 @@ class Student(BaseModel):
     resume_url: str
 
 class StudentOut(BaseModel):
-    id: str
+    sid: str
     name: str
     regno: str
     degree: str
@@ -740,31 +879,6 @@ job_applicants_collection = recruitment_db["jobapplicants"]
 # ------------------------------
 # Models
 # ------------------------------
-class GithubActivity(BaseModel):
-    total_repos: Optional[int]
-    total_stars: Optional[int]
-    total_forks: Optional[int]
-    total_commits: Optional[int]
-
-class Github(BaseModel):
-    username: Optional[str]
-    job_description_preview: Optional[str]
-    languages: Optional[Dict[str, int]]
-    matched_keywords: Optional[List[str]]
-    github_activity: Optional[GithubActivity]
-    commit_factor: Optional[float]
-    match_score: Optional[float]
-    compatibility_score: Optional[float]
-
-class LeetCodeProblems(BaseModel):
-    Total: Optional[int]
-    Easy: Optional[int]
-    Medium: Optional[int]
-    Hard: Optional[int]
-    AcceptanceRate: Optional[str]
-
-class LeetCodeContest(BaseModel):
-    AttendedContests: Optional[int]
 
 class LeetCodeBadge(BaseModel):
     id: Optional[str]
@@ -772,33 +886,37 @@ class LeetCodeBadge(BaseModel):
     icon: Optional[str]
     earnedOn: Optional[str]
 
-class LeetCode(BaseModel):
-    username: Optional[str]
-    country: Optional[str]
-    ranking: Optional[int]
-    problemsSolved: Optional[LeetCodeProblems]
-    contestStats: Optional[LeetCodeContest]
+class JobApplicant(BaseModel):
+    jobId: str
+    studentId: str
+    github_username: Optional[str]
+    github_job_description_preview: Optional[str]
+    github_languages: Optional[Dict[str, int]]
+    github_matched_keywords: Optional[List[str]]
+    github_commit_factor: Optional[float]
+    github_match_score: Optional[float]
+    github_compatibility_score: Optional[float]
+    total_repos: Optional[int]
+    total_stars: Optional[int]
+    total_forks: Optional[int]
+    total_commits: Optional[int]
+
+    leetcode_username: Optional[str]
+    leetcode_country: Optional[str]
+    leetcode_ranking: Optional[int]
+    leetcode_totalproblems: Optional[int]
+    leetcode_easy: Optional[int]
+    leetcode_medium: Optional[int]
+    leetcode_hard: Optional[int]
+    leetcode_acceptanceRate: Optional[str]
+    leetcode_contests: Optional[int]
     badges: Optional[List[LeetCodeBadge]]
 
-class CodeforcesDetails(BaseModel):
-    lastName: Optional[str]
-    country: Optional[str]
-    city: Optional[str]
-    rating: Optional[int]
-    rank: Optional[str]
-    maxRating: Optional[int]
-    maxRank: Optional[str]
-
-class Codeforces(BaseModel):
-    handle: Optional[str]
-    codeforces_details: Optional[CodeforcesDetails]
-
-class JobApplicant(BaseModel):
-    jobId: int
-    studentId: int
-    github: Optional[Github]
-    leetcode: Optional[LeetCode]
-    codeforces: Optional[Codeforces]
+    codeforces_handle: Optional[str]
+    codeforces_rating: Optional[int]
+    codeforces_rank: Optional[str]
+    codeforces_maxRating: Optional[int]
+    codeforces_maxRank: Optional[str]
 
 # ------------------------------
 # Serializer
@@ -806,11 +924,40 @@ class JobApplicant(BaseModel):
 def applicant_serializer(applicant) -> dict:
     return {
         "id": str(applicant["_id"]),
-        "jobId": applicant["jobId"],
-        "studentId": applicant["studentId"],
-        "github": applicant.get("github"),
-        "leetcode": applicant.get("leetcode"),
-        "codeforces": applicant.get("codeforces"),
+        "jobId": applicant.get("jobId"),
+        "studentId": applicant.get("studentId"),
+
+        # GitHub fields
+        "github_username": applicant.get("github_username"),
+        "github_job_description_preview": applicant.get("github_job_description_preview"),
+        "github_languages": applicant.get("github_languages"),
+        "github_matched_keywords": applicant.get("github_matched_keywords"),
+        "github_commit_factor": applicant.get("github_commit_factor"),
+        "github_match_score": applicant.get("github_match_score"),
+        "github_compatibility_score": applicant.get("github_compatibility_score"),
+        "total_repos": applicant.get("total_repos"),
+        "total_stars": applicant.get("total_stars"),
+        "total_forks": applicant.get("total_forks"),
+        "total_commits": applicant.get("total_commits"),
+
+        # LeetCode fields
+        "leetcode_username": applicant.get("leetcode_username"),
+        "leetcode_country": applicant.get("leetcode_country"),
+        "leetcode_ranking": applicant.get("leetcode_ranking"),
+        "leetcode_totalproblems": applicant.get("leetcode_totalproblems"),
+        "leetcode_easy": applicant.get("leetcode_easy"),
+        "leetcode_medium": applicant.get("leetcode_medium"),
+        "leetcode_hard": applicant.get("leetcode_hard"),
+        "leetcode_acceptanceRate": applicant.get("leetcode_acceptanceRate"),
+        "leetcode_contests": applicant.get("leetcode_contests"),
+        "badges": applicant.get("badges"),
+
+        # Codeforces fields
+        "codeforces_handle": applicant.get("codeforces_handle"),
+        "codeforces_rating": applicant.get("codeforces_rating"),
+        "codeforces_rank": applicant.get("codeforces_rank"),
+        "codeforces_maxRating": applicant.get("codeforces_maxRating"),
+        "codeforces_maxRank": applicant.get("codeforces_maxRank"),
     }
 
 # ------------------------------
@@ -854,112 +1001,96 @@ def delete_job_applicant(applicant_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Job applicant not found")
     return {"message": "Job applicant deleted successfully"}
-class GithubActivity(BaseModel):
-    total_repos: Optional[int]
-    total_stars: Optional[int]
-    total_forks: Optional[int]
-    total_commits: Optional[int]
 
-class Github(BaseModel):
-    username: Optional[str]
-    job_description_preview: Optional[str]
-    languages: Optional[Dict[str, int]]
-    matched_keywords: Optional[List[str]]
-    github_activity: Optional[GithubActivity]
-    commit_factor: Optional[float]
-    match_score: Optional[float]
-    compatibility_score: Optional[float]
+# ------------------------------
+# Pydantic Models
+# ------------------------------
+recruitment_db = client["recruitmentDB"]
+jobs_collectiontwo = recruitment_db["jobs"]
 
-class LeetcodeProblems(BaseModel):
-    Total: Optional[int]
-    Easy: Optional[int]
-    Medium: Optional[int]
-    Hard: Optional[int]
-    AcceptanceRate: Optional[str]
+class Job(BaseModel):
+    title: str
+    type: str = Field(default="Full-Time")
+    department: str
+    company_name:str
+    location: str
+    postDate: datetime = Field(default_factory=datetime.utcnow)
+    endDate: Optional[datetime] = None
+    responsibilities: str
+    qualifications: str
+    skills: str
 
-class LeetcodeContestStats(BaseModel):
-    AttendedContests: Optional[int]
+class JobOut(BaseModel):
+    id: str
+    title: str
+    type: str
+    department: str
+    company_name: str
+    location: str
+    postDate: datetime
+    endDate: Optional[datetime]
+    responsibilities: str
+    qualifications: str
+    skills: str
 
-class LeetcodeBadge(BaseModel):
-    id: Optional[str]
-    name: Optional[str]
-    icon: Optional[str]
-    earnedOn: Optional[str]
+# ------------------------------
+# Serializer
+# ------------------------------
 
-class Leetcode(BaseModel):
-    username: Optional[str]
-    country: Optional[str]
-    ranking: Optional[int]
-    problemsSolved: Optional[LeetcodeProblems]
-    contestStats: Optional[LeetcodeContestStats]
-    badges: Optional[List[LeetcodeBadge]]
+def job_serializer(job) -> dict:
+    return {
+        "id": str(job["_id"]),
+        "title": job["title"],
+        "type": job["type"],
+        "department": job["department"],
+        "location": job["location"],
+        "company_name": job["company_name"],
+        "postDate": job["postDate"],
+        "endDate": job.get("endDate"),
+        "responsibilities": job["responsibilities"],
+        "qualifications": job["qualifications"],
+        "skills": job["skills"],
+    }
 
-class CodeforcesDetails(BaseModel):
-    lastName: Optional[str]
-    country: Optional[str]
-    city: Optional[str]
-    rating: Optional[int]
-    rank: Optional[str]
-    maxRating: Optional[int]
-    maxRank: Optional[str]
+# ------------------------------
+# CRUD Endpoints
+# ------------------------------
 
-class Codeforces(BaseModel):
-    handle: Optional[str]
-    codeforces_details: Optional[CodeforcesDetails]
+@app.post("/jobs")
+def create_job(job: Job):
+    """Create a new job post"""
+    result = jobs_collectiontwo.insert_one(job.dict())
+    return {"id": str(result.inserted_id), "message": "Job created successfully"}
 
-class JobApplicant(BaseModel):
-    jobId: int = Field(..., description="Job ID reference")
-    studentId: int = Field(..., description="Student ID reference")
-    github: Optional[Github]
-    leetcode: Optional[Leetcode]
-    codeforces: Optional[Codeforces]
+@app.get("/jobs", response_model=List[JobOut])
+def get_jobs():
+    """Get all job posts"""
+    jobs = jobs_collectiontwo.find()
+    return [job_serializer(j) for j in jobs]
 
-# Helper: convert ObjectId
-def serialize_doc(doc):
-    doc["_id"] = str(doc["_id"])
-    return doc
+@app.get("/jobs/{job_id}", response_model=JobOut)
+def get_job(job_id: str):
+    """Get a specific job by ID"""
+    job = jobs_collectiontwo.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job_serializer(job)
 
-jobApplicant_db = client["recruitmentDB"]
-jobs_collectionthree = jobApplicant_db ["jobapplicants"]
-
-# CREATE
-@app.post("/jobapplicants", response_model=JobApplicant)
-def create_job_applicant(applicant: JobApplicant):
-    result = jobs_collectionthree.insert_one(applicant.dict())
-    new_doc =jobs_collectionthree.find_one({"_id": result.inserted_id})
-    return serialize_doc(new_doc)
-
-# READ ALL
-@app.get("/jobapplicants")
-def get_all_job_applicants():
-    docs = jobs_collectionthree.find().to_list(100)
-    return [serialize_doc(doc) for doc in docs]
-
-# READ ONE
-@app.get("/jobapplicants/{id}")
-def get_job_applicant(id: str):
-    doc = jobs_collectionthree.find_one({"_id": ObjectId(id)})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Applicant not found")
-    return serialize_doc(doc)
-
-# UPDATE
-@app.put("/jobapplicants/{id}")
-def update_job_applicant(id: str, applicant: JobApplicant):
-    update_data = {k: v for k, v in applicant.dict().items() if v is not None}
-    result = jobs_collectionthree.update_one({"_id": ObjectId(id)}, {"$set": update_data})
+@app.put("/jobs/{job_id}")
+def update_job(job_id: str, job: Job):
+    """Update an existing job"""
+    result = jobs_collectiontwo.update_one({"_id": ObjectId(job_id)}, {"$set": job.dict()})
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Applicant not found")
-    updated = jobs_collectionthree.find_one({"_id": ObjectId(id)})
-    return serialize_doc(updated)
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job updated successfully"}
 
-# DELETE
-@app.delete("/jobapplicants/{id}")
-def delete_job_applicant(id: str):
-    result = jobs_collectionthree.delete_one({"_id": ObjectId(id)})
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: str):
+    """Delete a job"""
+    result = jobs_collectiontwo.delete_one({"_id": ObjectId(job_id)})
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Applicant not found")
-    return {"message": "Applicant deleted successfully"}
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
