@@ -230,10 +230,6 @@ LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
 
 @mcp.tool(description="Fetch LeetCode user details and evaluate candidate")
 async def evaluate_leetcode_user(username: str):
-    """
-    Fetches LeetCode user stats including solved problems, contest ranking, and badges.
-    """
-
     query = """
     query getUserStats($username: String!) {
       matchedUser(username: $username) {
@@ -271,67 +267,63 @@ async def evaluate_leetcode_user(username: str):
       }
     }
     """
-
     variables = {"username": username}
 
-    try:
-        # ❗️requests is synchronous — use asyncio.to_thread to avoid blocking
-        import asyncio
-        response = await asyncio.to_thread(
-            requests.post,
-            LEETCODE_GRAPHQL_URL,
-            json={"query": query, "variables": variables},
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0 (MCP-Agent)"
-            },
-            timeout=10
-        )
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            response = await client.post(
+                LEETCODE_GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (MCP-Agent)"}
+            )
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=500, detail=f"Request error: {str(e)}")
 
-    # Check HTTP status
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail="Failed to fetch data from LeetCode"
-        )
+        raise HTTPException(status_code=response.status_code, detail="Failed to fetch data from LeetCode")
 
     data = response.json()
+    matched_user = data.get("data", {}).get("matchedUser")
+    if not matched_user:
+        raise HTTPException(status_code=404, detail="User not found or profile is private")
 
-    # Validate response
-    if "errors" in data or not data.get("data") or not data["data"].get("matchedUser"):
-        raise HTTPException(
-            status_code=404,
-            detail="User not found or profile is private"
-        )
+    profile = matched_user.get("profile") or {}
+    real_name = profile.get("realName")
+    country = profile.get("countryName")
+    ranking = profile.get("ranking")
+    avatar = profile.get("userAvatar")
+    reputation = profile.get("reputation")
 
-    user_data = data["data"]["matchedUser"]
-    contest_data = data["data"].get("userContestRanking", {})
+    submit_stats = matched_user.get("submitStatsGlobal") or {}
+    ac_submissions = submit_stats.get("acSubmissionNum") or []
+    total_submissions_list = submit_stats.get("totalSubmissionNum") or []
 
-    # 🧠 Extract problem stats
-    ac_stats = {
-        d["difficulty"]: d["count"]
-        for d in user_data["submitStatsGlobal"]["acSubmissionNum"]
-    }
+    ac_stats = {d.get("difficulty"): d.get("count", 0) for d in ac_submissions if d}
     total_solved = sum(ac_stats.values())
-
-    # 🐛 FIX: totalSubmissionNum is a list of dicts, so iterate properly
-    total_submissions = 0
-    for d in user_data["submitStatsGlobal"]["totalSubmissionNum"]:
-        total_submissions += d["count"]
-
-    # ✅ Compute acceptance rate safely
+    total_submissions = sum(d.get("count", 0) for d in total_submissions_list)
     acceptance_rate = round((total_solved / total_submissions) * 100, 2) if total_submissions > 0 else 0.0
 
-    # 🧩 Combine results
-    result = {
-        "username": user_data["username"],
-        "realName": user_data["profile"].get("realName"),
-        "country": user_data["profile"].get("countryName"),
-        "ranking": user_data["profile"].get("ranking"),
-        "avatar": user_data["profile"].get("userAvatar"),
-        "reputation": user_data["profile"].get("reputation"),
+    contest_data = data.get("data", {}).get("userContestRanking") or {}
+    contest_stats = {
+        "AttendedContests": contest_data.get("attendedContestsCount", 0),
+        "Rating": contest_data.get("rating", 0),
+        "GlobalRanking": contest_data.get("globalRanking", 0),
+        "TotalParticipants": contest_data.get("totalParticipants", 0),
+        "TopPercentage": contest_data.get("topPercentage", 0.0),
+    }
+
+    badges = [
+        {"id": badge.get("id"), "name": badge.get("name"), "icon": badge.get("icon"), "earnedOn": badge.get("creationDate")}
+        for badge in (matched_user.get("badges") or [])
+    ]
+
+    return {
+        "username": matched_user.get("username"),
+        "realName": real_name,
+        "country": country,
+        "ranking": ranking,
+        "avatar": avatar,
+        "reputation": reputation,
         "problemsSolved": {
             "Total": total_solved,
             "Easy": ac_stats.get("Easy", 0),
@@ -339,27 +331,9 @@ async def evaluate_leetcode_user(username: str):
             "Hard": ac_stats.get("Hard", 0),
             "AcceptanceRate": f"{acceptance_rate}%",
         },
-        "contestStats": {
-            "AttendedContests": contest_data.get("attendedContestsCount"),
-            "Rating": contest_data.get("rating"),
-            "GlobalRanking": contest_data.get("globalRanking"),
-            "TotalParticipants": contest_data.get("totalParticipants"),
-            "TopPercentage": contest_data.get("topPercentage"),
-        },
-        "badges": [
-            {
-                "id": badge.get("id"),
-                "name": badge.get("name"),
-                "icon": badge.get("icon"),
-                "earnedOn": badge.get("creationDate")
-            }
-            for badge in user_data.get("badges", [])
-        ]
+        "contestStats": contest_stats,
+        "badges": badges
     }
-
-    return result
-
-
 
 @mcp.tool(description="Analyze GitHub candidate profile against job description and compute compatibility score")
 async def analyze_candidate(username: str, job_description: str):

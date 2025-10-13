@@ -514,7 +514,7 @@ async def get_codeforces_score(username: str):
                 }
 
 
-@app.get("/codeprofiles/{username}/leetcodescore")
+@app.get("/leetcode/{username}")
 async def get_leetcode_score(username: str):
     async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
@@ -530,9 +530,8 @@ async def get_leetcode_score(username: str):
             # Call the tool
             response = await session.call_tool(
                 tool_name,
-                {"leetcode_username": username}
+                {"username": username}
             )
-
             # Access attributes properly (not subscripting)
             if response.isError:
                 return {"error": "Tool returned an error", "details": response}
@@ -625,7 +624,7 @@ async def evaluate_job_description(
                     {
                         "username": username, 
                         "job_description": final_output
-                    }  # your tool input params
+                    }  
                 )
                 # ✅ Access attributes properly (not subscripting)
                 if response.isError:
