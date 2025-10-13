@@ -6,11 +6,11 @@ import httpx
 from fastapi import Body, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Annotated
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from datetime import datetime
+
 from fastapi import HTTPException
 from bson import ObjectId
 from pymongo import MongoClient
@@ -530,7 +530,7 @@ async def get_leetcode_score(username: str):
             # Call the tool
             response = await session.call_tool(
                 tool_name,
-                {"username": username}
+                {"leetcode_username": username}
             )
 
             # Access attributes properly (not subscripting)
@@ -588,48 +588,73 @@ async def evaluate_job_description(
 
             # ✅ Step 4: Build prompt for the LLM
             full_prompt = f"""
-            You are an AI technical recruiter. Analyze the following job description and extract
-            all the core technologies, frameworks, and required skills from it.
+            Your task is to identify the relevant technologies, programming languages, and tools from the following job description:
 
-            Then, using the MCP tools provided, fetch the GitHub or coding profile data for the user '{username}'.
-            use the tool generative `get_github_proficiency` to fetch the user's github details.
-            use the PAT_Token {os.getenv("PAT_TOKEN")} to fetch the data.
-            Compare the extracted JD skill sets with the user's skills, repositories, and technologies.
-
-            Output a detailed JSON response with:
-            - extracted_jd_techs: [list of technologies in JD]
-            - candidate_techs: [list of technologies user actually uses]
-            - compatibility_score: number from 0 to 100 (how well the candidate matches)
-            - reasoning: short paragraph explaining the compatibility level
-
-            Job Description:
             {job_description}
 
-            Username:
-            {username}
+            Instructions:
+            1. If specific technologies, frameworks, or programming languages are mentioned directly (e.g., Python, React, Node.js), extract them exactly as stated.
+            2. If broader fields or domains are mentioned (e.g., Machine Learning, Web Development, Data Science), infer the most relevant underlying tech stacks typically used in that domain.
+            3. Return a concise, comma-separated list of languages only that need to be in github — no explanations or extra text.
             """
 
             print("📤 Sending JD comparison request to Gemini...")
 
-            # ✅ Step 5: Let the agent reason + use MCP tools
+            # ✅ Step 5b: Let the agent reason + use MCP tools (proper messages list)
             try:
-                response = await agent.ainvoke({"messages": full_prompt})
-                final_output = response["messages"][-1].content
+                messages = [{"role": "user", "content": full_prompt}]
+                response = await agent.ainvoke({"messages": messages})
 
-                print("✅ JD–Resume Match Result:", final_output)
+                # Safely extract final text
+                final_output = None
+                if isinstance(response, dict) and response.get("messages"):
+                    msgs = response.get("messages")
+                    last = msgs[-1]
+                    final_output = getattr(last, "content", None) or (last.get("content") if isinstance(last, dict) else None)
+                if not final_output:
+                    final_output = response.get("text") if isinstance(response, dict) else str(response)
 
-                return {
-                    "status": "success",
-                    "username": username,
-                    "result": final_output,
-                }
+                print(final_output)
+
+                  # Pick the specific tool you want to call
+                tool_name = "analyze_candidate"  # Example tool name
+
+                # Call the tool with required arguments
+                response = await session.call_tool(
+                    tool_name,
+                    {
+                        "username": username, 
+                        "job_description": final_output
+                    }  # your tool input params
+                )
+                # ✅ Access attributes properly (not subscripting)
+                if response.isError:
+                    return {"error": "Tool returned an error", "details": response}
+
+                # Extract text from first content item
+                content_text = None
+                if response.content and len(response.content) > 0:
+                    content_text = response.content[0].text
+
+                # Try parsing JSON string
+                try:
+                    json_data = json.loads(content_text)
+                    return json_data
+                except Exception as e:
+                    return {
+                        "error": f"Failed to parse JSON: {str(e)}",
+                        "raw_text": content_text
+                    }
+
 
             except Exception as e:
-                print(f"❌ JD Evaluation failed: {e}")
-                return {
+                error_msg = f"Failed to run agent: {str(e)}"
+                print(f"❌ JD Evaluation failed: {error_msg}")
+                return JSONResponse(status_code=500, content={
                     "status": "error",
-                    "message": f"Failed to evaluate JD compatibility: {str(e)}",
-                }
+                    "message": error_msg,
+         
+                })
 
 from typing import Optional, List
 
@@ -717,92 +742,6 @@ def delete_student(student_id: str):
         raise HTTPException(status_code=404, detail="Student not found")
     return {"message": "Student deleted successfully"}
 
-# ------------------------------
-# Pydantic Models
-# ------------------------------
-recruitment_db = client["recruitmentDB"]
-jobs_collectiontwo = recruitment_db["jobs"]
-
-class Job(BaseModel):
-    title: str
-    type: str = Field(default="Full-Time")
-    department: str
-    location: str
-    postDate: datetime = Field(default_factory=datetime.utcnow)
-    endDate: Optional[datetime] = None
-    responsibilities: str
-    qualifications: str
-    skills: str
-
-class JobOut(BaseModel):
-    id: str
-    title: str
-    type: str
-    department: str
-    location: str
-    postDate: datetime
-    endDate: Optional[datetime]
-    responsibilities: str
-    qualifications: str
-    skills: str
-
-# ------------------------------
-# Serializer
-# ------------------------------
-
-def job_serializer(job) -> dict:
-    return {
-        "id": str(job["_id"]),
-        "title": job["title"],
-        "type": job["type"],
-        "department": job["department"],
-        "location": job["location"],
-        "postDate": job["postDate"],
-        "endDate": job.get("endDate"),
-        "responsibilities": job["responsibilities"],
-        "qualifications": job["qualifications"],
-        "skills": job["skills"],
-    }
-
-# ------------------------------
-# CRUD Endpoints
-# ------------------------------
-
-@app.post("/jobs")
-def create_job(job: Job):
-    """Create a new job post"""
-    result = jobs_collectiontwo.insert_one(job.dict())
-    return {"id": str(result.inserted_id), "message": "Job created successfully"}
-
-@app.get("/jobs", response_model=List[JobOut])
-def get_jobs():
-    """Get all job posts"""
-    jobs = jobs_collectiontwo.find()
-    return [job_serializer(j) for j in jobs]
-
-@app.get("/jobs/{job_id}", response_model=JobOut)
-def get_job(job_id: str):
-    """Get a specific job by ID"""
-    job = jobs_collectiontwo.find_one({"_id": ObjectId(job_id)})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job_serializer(job)
-
-@app.put("/jobs/{job_id}")
-def update_job(job_id: str, job: Job):
-    """Update an existing job"""
-    result = jobs_collectiontwo.update_one({"_id": ObjectId(job_id)}, {"$set": job.dict()})
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"message": "Job updated successfully"}
-
-@app.delete("/jobs/{job_id}")
-def delete_job(job_id: str):
-    """Delete a job"""
-    result = jobs_collectiontwo.delete_one({"_id": ObjectId(job_id)})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"message": "Job deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
