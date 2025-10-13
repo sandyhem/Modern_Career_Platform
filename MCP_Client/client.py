@@ -53,26 +53,6 @@ class QueryRequest(BaseModel):
     query: str
 
 
-# Add health check endpoint
-@app.get("/health")
-async def health_check():
-    """Health check endpoint for React frontend"""
-    return {"status": "healthy", "timestamp": "2025-10-07"}
-
-# Handle preflight requests for CORS
-@app.options("/{full_path:path}")
-async def preflight_handler(full_path: str):
-    """Handle CORS preflight requests"""
-    return JSONResponse(
-        content={"message": "OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        }
-    )
-
-
 
 @app.get("/tools")
 async def list_tools():
@@ -100,380 +80,380 @@ async def list_tools():
             return {"tools": tool_info, "count": len(tools)}
 
 
-@app.post("/query")
-async def process_query(request: QueryRequest):
-    """Process a user query using MCP tools and AI agent"""
-    if not request.query or not request.query.strip():
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "Query cannot be empty",
-                "status": "error",
-                "timestamp": "2025-10-07"
-            }
-        )
+# @app.post("/query")
+# async def process_query(request: QueryRequest):
+#     """Process a user query using MCP tools and AI agent"""
+#     if not request.query or not request.query.strip():
+#         return JSONResponse(
+#             status_code=400,
+#             content={
+#                 "error": "Query cannot be empty",
+#                 "status": "error",
+#                 "timestamp": "2025-10-07"
+#             }
+#         )
     
-    async with streamablehttp_client("http://localhost:10000/db/mcp") as (read_stream, write_stream, get_session_id):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+#     async with streamablehttp_client("http://localhost:10000/db/mcp") as (read_stream, write_stream, get_session_id):
+#         async with ClientSession(read_stream, write_stream) as session:
+#             await session.initialize()
 
-            # 🔹 Load MCP tools and convert to LangChain-compatible tools
-            tools = await load_mcp_tools(session)
+#             # 🔹 Load MCP tools and convert to LangChain-compatible tools
+#             tools = await load_mcp_tools(session)
 
-            print(f"🔧 Loaded {len(tools)} MCP tools")
+#             print(f"🔧 Loaded {len(tools)} MCP tools")
 
-            if not tools:
-                return {"error": "No tools loaded from MCP server"}
+#             if not tools:
+#                 return {"error": "No tools loaded from MCP server"}
 
-            # 🔹 Setup Gemini LLM
-            google_api_key = os.getenv("GOOGLE_API_KEY")
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.2,
-                max_retries=2,
-                google_api_key=google_api_key
-            )
+#             # 🔹 Setup Gemini LLM
+#             google_api_key = os.getenv("GOOGLE_API_KEY")
+#             llm = ChatGoogleGenerativeAI(
+#                 model="gemini-2.0-flash",
+#                 temperature=0.2,
+#                 max_retries=2,
+#                 google_api_key=google_api_key
+#             )
 
-            # 🔹 Create LangGraph Agent
-            agent = create_react_agent(llm, tools)
+#             # 🔹 Create LangGraph Agent
+#             agent = create_react_agent(llm, tools)
 
-            # Use the user's query
-            query = [
-                {"role": "user", "content": request.query}
-            ]
+#             # Use the user's query
+#             query = [
+#                 {"role": "user", "content": request.query}
+#             ]
 
-            try:
-                # 🔹 Invoke the agent
-                print(f"🔍 Processing query: {request.query}")
-                response = await agent.ainvoke({"messages": query})
-                # print(response)
+#             try:
+#                 # 🔹 Invoke the agent
+#                 print(f"🔍 Processing query: {request.query}")
+#                 response = await agent.ainvoke({"messages": query})
+#                 # print(response)
 
-                # ✅ Extract only final textual response
-                final_output = response["messages"][-1].content
+#                 # ✅ Extract only final textual response
+#                 final_output = response["messages"][-1].content
 
-                print("🤖 Final Output:", final_output)
-                return JSONResponse(
-                    status_code=200,
-                    content={
-                        "result": final_output, 
-                        "query": request.query,
-                        "status": "success",
-                        "timestamp": "2025-10-07"
-                    }
-                )
+#                 print("🤖 Final Output:", final_output)
+#                 return JSONResponse(
+#                     status_code=200,
+#                     content={
+#                         "result": final_output, 
+#                         "query": request.query,
+#                         "status": "success",
+#                         "timestamp": "2025-10-07"
+#                     }
+#                 )
             
-            except Exception as e:
-                error_msg = f"Failed to process query: {str(e)}"
-                print(f"❌ Error: {error_msg}")
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": error_msg, 
-                        "query": request.query,
-                        "status": "error",
-                        "timestamp": "2025-10-07"
-                    }
-                )
+#             except Exception as e:
+#                 error_msg = f"Failed to process query: {str(e)}"
+#                 print(f"❌ Error: {error_msg}")
+#                 return JSONResponse(
+#                     status_code=500,
+#                     content={
+#                         "error": error_msg, 
+#                         "query": request.query,
+#                         "status": "error",
+#                         "timestamp": "2025-10-07"
+#                     }
+#                 )
 
-@app.post("/DatabaseBot")
-async def db_query(request: QueryRequest):
-    async with streamablehttp_client("http://localhost:10000/db/mcp") as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+# @app.post("/DatabaseBot")
+# async def db_query(request: QueryRequest):
+#     async with streamablehttp_client("http://localhost:10000/db/mcp") as (read_stream, write_stream, _):
+#         async with ClientSession(read_stream, write_stream) as session:
+#             await session.initialize()
 
-            # Load tools and resources
-            tools = await load_mcp_tools(session)
-            schema = await session.read_resource("file://schema/candidates")
-            # sql_prompt = (await session.get_prompt("sql_generator", {"user_query": request.query}))["text"]
+#             # Load tools and resources
+#             tools = await load_mcp_tools(session)
+#             schema = await session.read_resource("file://schema/candidates")
+#             # sql_prompt = (await session.get_prompt("sql_generator", {"user_query": request.query}))["text"]
 
-            # # Build prompt context
-            # user_query = "List candidates with CGPA > 8.5"
-            full_prompt = f"""
-            Database schema:
-            {schema}
+#             # # Build prompt context
+#             # user_query = "List candidates with CGPA > 8.5"
+#             full_prompt = f"""
+#             Database schema:
+#             {schema}
 
-            SQL generator instructions:
+#             SQL generator instructions:
 
-            You are an SQL expert.
-            Convert the following recruiter request into a valid MySQL SELECT query.
-            Use only the provided table and columns.
+#             You are an SQL expert.
+#             Convert the following recruiter request into a valid MySQL SELECT query.
+#             Use only the provided table and columns.
 
-            Table: candidates
-            Columns: id, name, cgpa, skills, experience
+#             Table: candidates
+#             Columns: id, name, cgpa, skills, experience
 
-            After generating SQL, immediately call the execute_sql tool to fetch results.
-            Return only the query result, not the SQL text.
+#             After generating SQL, immediately call the execute_sql tool to fetch results.
+#             Return only the query result, not the SQL text.
 
-            User query:
-            {request.query}
-            """
-            # 🔹 Setup Gemini LLM
-            google_api_key = os.getenv("GOOGLE_API_KEY")
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.2,
-                max_retries=2,
-                google_api_key=google_api_key
-            )
+#             User query:
+#             {request.query}
+#             """
+#             # 🔹 Setup Gemini LLM
+#             google_api_key = os.getenv("GOOGLE_API_KEY")
+#             llm = ChatGoogleGenerativeAI(
+#                 model="gemini-2.0-flash",
+#                 temperature=0.2,
+#                 max_retries=2,
+#                 google_api_key=google_api_key
+#             )
 
-            # 🔹 Create LangGraph Agent
-            agent = create_react_agent(llm, tools)
+#             # 🔹 Create LangGraph Agent
+#             agent = create_react_agent(llm, tools)
 
-            # Use the user's query
-            query = [
-                {"role": "user", "content": full_prompt}
-            ]
+#             # Use the user's query
+#             query = [
+#                 {"role": "user", "content": full_prompt}
+#             ]
 
-            try:
-                # 🔹 Invoke the agent
-                print(f"🔍 Processing query: {full_prompt}")
-                response = await agent.ainvoke({"messages": full_prompt})
-                # print(response)
+#             try:
+#                 # 🔹 Invoke the agent
+#                 print(f"🔍 Processing query: {full_prompt}")
+#                 response = await agent.ainvoke({"messages": full_prompt})
+#                 # print(response)
 
-                # ✅ Extract only final textual response
-                final_output = response["messages"][-1].content
+#                 # ✅ Extract only final textual response
+#                 final_output = response["messages"][-1].content
 
-                print("🤖 Final Output:", final_output)
-                return {
-                    "result": final_output, 
-                    "query": full_prompt,
-                    "status": "success"
-                }
+#                 print("🤖 Final Output:", final_output)
+#                 return {
+#                     "result": final_output, 
+#                     "query": full_prompt,
+#                     "status": "success"
+#                 }
             
-            except Exception as e:
-                error_msg = f"Failed to process query: {str(e)}"
-                print(f"❌ Error: {error_msg}")
-                return {
-                    "error": error_msg, 
-                    "query": request.query,
-                    "status": "error"
-                }
+#             except Exception as e:
+#                 error_msg = f"Failed to process query: {str(e)}"
+#                 print(f"❌ Error: {error_msg}")
+#                 return {
+#                     "error": error_msg, 
+#                     "query": request.query,
+#                     "status": "error"
+#                 }
 
 
-@app.post("/comparer")
-async def comparer_query(
-    usernames: Annotated[str | None, Query(description="Comma-separated GitHub usernames")]
-):
-    """
-    Compare multiple GitHub users using MCP data + Gemini LLM.
-    Body: { "query": "custom comparison request" }
-    Params: ?usernames=user1,user2,user3
-    """
+# @app.post("/comparer")
+# async def comparer_query(
+#     usernames: Annotated[str | None, Query(description="Comma-separated GitHub usernames")]
+# ):
+#     """
+#     Compare multiple GitHub users using MCP data + Gemini LLM.
+#     Body: { "query": "custom comparison request" }
+#     Params: ?usernames=user1,user2,user3
+#     """
 
-    # ✅ Step 1: Validate inputs
-    if not usernames:
-        return {"status": "error", "message": "Please provide usernames as query params, e.g. ?usernames=user1,user2"}
+#     # ✅ Step 1: Validate inputs
+#     if not usernames:
+#         return {"status": "error", "message": "Please provide usernames as query params, e.g. ?usernames=user1,user2"}
 
-    username_list = [u.strip() for u in usernames.split(",") if u.strip()]
-    if not username_list:
-        return {"status": "error", "message": "No valid usernames found."}
+#     username_list = [u.strip() for u in usernames.split(",") if u.strip()]
+#     if not username_list:
+#         return {"status": "error", "message": "No valid usernames found."}
 
-    print("👥 GitHub Usernames:", username_list)
+#     print("👥 GitHub Usernames:", username_list)
    
 
-    # Step 2: Connect to MCP Server
-    async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+#     # Step 2: Connect to MCP Server
+#     async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
+#         async with ClientSession(read_stream, write_stream) as session:
+#             await session.initialize()
 
-            # Load MCP tools
-            tools = await load_mcp_tools(session)
-            print("Loaded MCP Tools:", [t.name for t in tools])
+#             # Load MCP tools
+#             tools = await load_mcp_tools(session)
+#             print("Loaded MCP Tools:", [t.name for t in tools])
 
-            # # Find the GitHub proficiency tool
-            # try:
-            #     tool = next(t for t in tools if "GitHub Languages Proficiency" in t.description)
-            # except StopIteration:
-            #     return {"status": "error", "message": "MCP tool 'Get GitHub Languages Proficiency used by a user' not found."}
+#             # # Find the GitHub proficiency tool
+#             # try:
+#             #     tool = next(t for t in tools if "GitHub Languages Proficiency" in t.description)
+#             # except StopIteration:
+#             #     return {"status": "error", "message": "MCP tool 'Get GitHub Languages Proficiency used by a user' not found."}
 
-            # Step 3: Fetch GitHub data concurrently
-            # async def fetch_user_data(username):
-            #     try:
-            #         print(f"📊 Fetching data for {username}...")
-            #         result = await tool.ainvoke({"username": username})
-            #         return username, result
-            #     except Exception as e:
-            #         print(f"⚠️ Error fetching {username}: {e}")
-            #         return username, {"error": str(e)}
+#             # Step 3: Fetch GitHub data concurrently
+#             # async def fetch_user_data(username):
+#             #     try:
+#             #         print(f"📊 Fetching data for {username}...")
+#             #         result = await tool.ainvoke({"username": username})
+#             #         return username, result
+#             #     except Exception as e:
+#             #         print(f"⚠️ Error fetching {username}: {e}")
+#             #         return username, {"error": str(e)}
 
-            # results = await asyncio.gather(*(fetch_user_data(u) for u in username_list))
-            # user_data = dict(results)
+#             # results = await asyncio.gather(*(fetch_user_data(u) for u in username_list))
+#             # user_data = dict(results)
 
-            #  Step 4: Initialize Gemini LLM
-            load_dotenv()
-            google_api_key = os.getenv("GOOGLE_API_KEY")
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.2,
-                max_retries=2,
-                google_api_key=google_api_key
-            )
+#             #  Step 4: Initialize Gemini LLM
+#             load_dotenv()
+#             google_api_key = os.getenv("GOOGLE_API_KEY")
+#             llm = ChatGoogleGenerativeAI(
+#                 model="gemini-2.0-flash",
+#                 temperature=0.2,
+#                 max_retries=2,
+#                 google_api_key=google_api_key
+#             )
 
-            #  Step 5: Create LangGraph Agent
-            agent = create_react_agent(llm, tools)
+#             #  Step 5: Create LangGraph Agent
+#             agent = create_react_agent(llm, tools)
 
-            #  Step 6: Build prompt for the agent
-            full_prompt = f"""
-            Compare the following GitHub users.
-            First fetch the data for each user using the 'Get GitHub Languages Proficiency used by a user' tool for each username.
-            use only the tools to fetch the data don't make up any data on your own.
-            your PAT_TOKEN is {os.getenv("PAT_TOKEN")}
-            Users:
-            {', '.join(username_list)}
+#             #  Step 6: Build prompt for the agent
+#             full_prompt = f"""
+#             Compare the following GitHub users.
+#             First fetch the data for each user using the 'Get GitHub Languages Proficiency used by a user' tool for each username.
+#             use only the tools to fetch the data don't make up any data on your own.
+#             your PAT_TOKEN is {os.getenv("PAT_TOKEN")}
+#             Users:
+#             {', '.join(username_list)}
 
-            Generate a clear, structured comparison including:
-            - Language proficiency & dominant languages
-            - Repository and contribution insights
-            - Strengths and specialization areas
-            - Overall comparison summary
-            give the final output in a more structured way with headings and subheadings as short summary report.
-            """
+#             Generate a clear, structured comparison including:
+#             - Language proficiency & dominant languages
+#             - Repository and contribution insights
+#             - Strengths and specialization areas
+#             - Overall comparison summary
+#             give the final output in a more structured way with headings and subheadings as short summary report.
+#             """
 
-            print("🧠 Sending prompt to Gemini...")
+#             print("🧠 Sending prompt to Gemini...")
 
-            # ✅ Step 7: Invoke the agent
-            try:
-                response = await agent.ainvoke({"messages": full_prompt})
-                final_output = response["messages"][-1].content
+#             # ✅ Step 7: Invoke the agent
+#             try:
+#                 response = await agent.ainvoke({"messages": full_prompt})
+#                 final_output = response["messages"][-1].content
 
-                print("🤖 Final Output:", final_output)
+#                 print("🤖 Final Output:", final_output)
 
-                return {
-                    "status": "success",
-                    "query": full_prompt,
-                    "usernames": username_list,
-                    "result": final_output
-                }
+#                 return {
+#                     "status": "success",
+#                     "query": full_prompt,
+#                     "usernames": username_list,
+#                     "result": final_output
+#                 }
 
-            except Exception as e:
-                print(f"❌ LLM processing failed: {e}")
-                return {
-                    "status": "error",
-                    "message": f"Failed to process comparison: {str(e)}"
-                }
+#             except Exception as e:
+#                 print(f"❌ LLM processing failed: {e}")
+#                 return {
+#                     "status": "error",
+#                     "message": f"Failed to process comparison: {str(e)}"
+#                 }
 
 
-@app.post("/comparerchatbot")
-async def comparer_chatbot(
-    request: QueryRequest,
-    usernames: Annotated[str | None, Query(description="Comma-separated GitHub usernames")],
-):
-    """
-    Smart Recruiter MCP Agent:
-    Accepts a custom query and analyzes multiple GitHub profiles using MCP tools + Gemini.
-    """
+# @app.post("/comparerchatbot")
+# async def comparer_chatbot(
+#     request: QueryRequest,
+#     usernames: Annotated[str | None, Query(description="Comma-separated GitHub usernames")],
+# ):
+#     """
+#     Smart Recruiter MCP Agent:
+#     Accepts a custom query and analyzes multiple GitHub profiles using MCP tools + Gemini.
+#     """
 
-    # ✅ Step 1: Validate input
-    if not usernames:
-        return {"status": "error", "message": "Please provide usernames as query params, e.g. ?usernames=user1,user2"}
+#     # ✅ Step 1: Validate input
+#     if not usernames:
+#         return {"status": "error", "message": "Please provide usernames as query params, e.g. ?usernames=user1,user2"}
 
-    username_list = [u.strip() for u in usernames.split(",") if u.strip()]
-    if not username_list:
-        return {"status": "error", "message": "No valid usernames found."}
+#     username_list = [u.strip() for u in usernames.split(",") if u.strip()]
+#     if not username_list:
+#         return {"status": "error", "message": "No valid usernames found."}
 
-    user_query = request.query
-    print(f"👥 GitHub Users: {username_list}")
-    print(f"💬 User Query: {user_query}")
+#     user_query = request.query
+#     print(f"👥 GitHub Users: {username_list}")
+#     print(f"💬 User Query: {user_query}")
 
-    # ✅ Step 2: Connect to MCP Server
-    async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+#     # ✅ Step 2: Connect to MCP Server
+#     async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
+#         async with ClientSession(read_stream, write_stream) as session:
+#             await session.initialize()
 
-            # ✅ Step 3: Load available MCP tools
-            tools = await load_mcp_tools(session)
-            print("🔧 Loaded MCP Tools:", [t.name for t in tools])
+#             # ✅ Step 3: Load available MCP tools
+#             tools = await load_mcp_tools(session)
+#             print("🔧 Loaded MCP Tools:", [t.name for t in tools])
 
-            # ✅ Step 4: Initialize Gemini LLM
-            google_api_key = os.getenv("GOOGLE_API_KEY")
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=0.2,
-                max_retries=2,
-                google_api_key=google_api_key
-            )
+#             # ✅ Step 4: Initialize Gemini LLM
+#             google_api_key = os.getenv("GOOGLE_API_KEY")
+#             llm = ChatGoogleGenerativeAI(
+#                 model="gemini-2.0-flash",
+#                 temperature=0.2,
+#                 max_retries=2,
+#                 google_api_key=google_api_key
+#             )
 
-            # ✅ Step 5: Create LangGraph Agent with MCP Tools
-            agent = create_react_agent(llm, tools)
+#             # ✅ Step 5: Create LangGraph Agent with MCP Tools
+#             agent = create_react_agent(llm, tools)
 
-            # ✅ Step 6: Build the dynamic prompt for the agent
-            full_prompt = f"""
-            You are a Smart Recruiter Agent.
+#             # ✅ Step 6: Build the dynamic prompt for the agent
+#             full_prompt = f"""
+#             You are a Smart Recruiter Agent.
 
-            You have access to the MCP tool: "Get GitHub Languages Proficiency used by a user".
-            Use this tool to fetch data for each of the following GitHub users:
-            {', '.join(username_list)}
+#             You have access to the MCP tool: "Get GitHub Languages Proficiency used by a user".
+#             Use this tool to fetch data for each of the following GitHub users:
+#             {', '.join(username_list)}
 
-            The personal access token (PAT) is available as: {os.getenv("PAT_TOKEN")}
+#             The personal access token (PAT) is available as: {os.getenv("PAT_TOKEN")}
 
-            Then, based on their GitHub data, respond to the following recruiter query:
-            "{user_query}"
+#             Then, based on their GitHub data, respond to the following recruiter query:
+#             "{user_query}"
 
-            Instructions:
-            - Always use MCP tools to gather data (never make up data)
-            - Return a concise, well-structured report with sections and subheadings
-            - If comparison is needed, highlight similarities and differences between users
-            """
+#             Instructions:
+#             - Always use MCP tools to gather data (never make up data)
+#             - Return a concise, well-structured report with sections and subheadings
+#             - If comparison is needed, highlight similarities and differences between users
+#             """
 
-            print("🧠 Sending prompt to Gemini via MCP...")
+#             print("🧠 Sending prompt to Gemini via MCP...")
 
-            # ✅ Step 7: Invoke the MCP-integrated agent
-            try:
-                response = await agent.ainvoke({"messages": full_prompt})
-                final_output = response["messages"][-1].content
+#             # ✅ Step 7: Invoke the MCP-integrated agent
+#             try:
+#                 response = await agent.ainvoke({"messages": full_prompt})
+#                 final_output = response["messages"][-1].content
 
-                print("🤖 Final Output:", final_output)
+#                 print("🤖 Final Output:", final_output)
 
-                return {
-                    "status": "success",
-                    "query": user_query,
-                    "usernames": username_list,
-                    "result": final_output,
-                }
+#                 return {
+#                     "status": "success",
+#                     "query": user_query,
+#                     "usernames": username_list,
+#                     "result": final_output,
+#                 }
 
-            except Exception as e:
-                print(f"❌ Error while processing: {e}")
-                return {
-                    "status": "error",
-                    "message": f"Failed to process recruiter query: {str(e)}",
-                }
+#             except Exception as e:
+#                 print(f"❌ Error while processing: {e}")
+#                 return {
+#                     "status": "error",
+#                     "message": f"Failed to process recruiter query: {str(e)}",
+#                 }
 
-@app.get("/github/{username}/githubscore")
-async def get_github_score(username: str, token: str = Query(None, description="GitHub Personal Access Token")):
-    async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
+# @app.get("/github/{username}/githubscore")
+# async def get_github_score(username: str, token: str = Query(None, description="GitHub Personal Access Token")):
+#     async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
+#         async with ClientSession(read_stream, write_stream) as session:
+#             await session.initialize()
 
-            # ✅ Step 3: Load available MCP tools
-            tools = await load_mcp_tools(session)
-            print("🔧 Loaded MCP Tools:", [t.name for t in tools])
+#             # ✅ Step 3: Load available MCP tools
+#             tools = await load_mcp_tools(session)
+#             print("🔧 Loaded MCP Tools:", [t.name for t in tools])
 
-                   # Pick the specific tool you want to call
-            tool_name = "get_github_proficiency"  # Example tool name
+#                    # Pick the specific tool you want to call
+#             tool_name = "get_github_proficiency"  # Example tool name
 
-            # Call the tool with required arguments
-            response = await session.call_tool(
-                tool_name,
-                {"username": username,"token":token}  # your tool input params
-            )
-            # ✅ Access attributes properly (not subscripting)
-            if response.isError:
-                return {"error": "Tool returned an error", "details": response}
+#             # Call the tool with required arguments
+#             response = await session.call_tool(
+#                 tool_name,
+#                 {"username": username,"token":token}  # your tool input params
+#             )
+#             # ✅ Access attributes properly (not subscripting)
+#             if response.isError:
+#                 return {"error": "Tool returned an error", "details": response}
 
-            # Extract text from first content item
-            content_text = None
-            if response.content and len(response.content) > 0:
-                content_text = response.content[0].text
+#             # Extract text from first content item
+#             content_text = None
+#             if response.content and len(response.content) > 0:
+#                 content_text = response.content[0].text
 
-            # Try parsing JSON string
-            try:
-                json_data = json.loads(content_text)
-                return json_data
-            except Exception as e:
-                return {
-                    "error": f"Failed to parse JSON: {str(e)}",
-                    "raw_text": content_text
-                }
+#             # Try parsing JSON string
+#             try:
+#                 json_data = json.loads(content_text)
+#                 return json_data
+#             except Exception as e:
+#                 return {
+#                     "error": f"Failed to parse JSON: {str(e)}",
+#                     "raw_text": content_text
+#                 }
 
 
 @app.get("/codeprofiles/{username}/codeforcesscore")

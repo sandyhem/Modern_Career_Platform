@@ -1,100 +1,109 @@
-# Database_Server.py
-import contextlib
 import os
+import contextlib
 from mcp.server.fastmcp import FastMCP, Context
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import text
-import sqlparse
+from pymongo import MongoClient
 from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
+from dotenv import load_dotenv
+
+# Load environment
+load_dotenv()
 
 # ------------------ MCP APP ------------------
 mcp = FastMCP("Database Server", stateless_http=True)
 
 # ---------- DATABASE SETUP ----------
-DATABASE_URL = os.getenv(
-    "MYSQL_URL",
-    "mysql+aiomysql://root:root@localhost:3306/recruit_db",
-)
-engine = create_async_engine(DATABASE_URL, echo=False)  # global engine
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+MONGO_DB = os.getenv("MONGO_DB", "recruitmentDB")
+client = MongoClient(MONGO_URI)
+db = client[MONGO_DB]
 
-# Optional lifespan to verify DB connection and dispose engine
+# ---------- LIFESPAN ----------
 @contextlib.asynccontextmanager
 async def lifespan(app: FastMCP):
-    # Test connection
-    async with engine.begin() as conn:
-        await conn.execute(text("SELECT 1"))
-    print("✅ DB Connected")
+    try:
+        # Test connection
+        client.list_database_names()
+        print("✅ MongoDB connected successfully")
+    except Exception as e:
+        print(f"❌ MongoDB connection failed: {e}")
     yield
-    await engine.dispose()
-    print("🔒 DB Closed")
+    client.close()
+    print("🔒 MongoDB connection closed")
 
 mcp.lifespan = lifespan
 
-# ---------- RESOURCES ----------
-@mcp.resource("file://schema/candidates")
-def candidates_schema():
-    """Database schema for candidates"""
+# ---------- RESOURCE ----------
+@mcp.resource("file://schema/jobs")
+def jobs_schema():
+    """MongoDB jobs collection schema"""
     return {
-        "table": "candidates",
-        "columns": {
-            "id": "INT",
-            "name": "VARCHAR(100)",
-            "cgpa": "FLOAT",
-            "skills": "TEXT",
-            "experience": "INT",
+        "collection": "jobs",
+        "fields": {
+            "title": "string",
+            "type": "string",
+            "department": "string",
+            "location": "string",
+            "postDate": "datetime",
+            "endDate": "datetime",
+            "responsibilities": "string",
+            "qualifications": "string",
+            "skills": "string"
         },
     }
 
 # ---------- PROMPT ----------
-@mcp.prompt("sql_generator")
-def sql_prompt():
-    """Prompt template for generating SQL and executing it."""
+@mcp.prompt("mongo_query_generator")
+def mongo_prompt():
+    """Prompt template for MongoDB queries"""
     return """
-    You are an SQL expert.
-    Convert the following recruiter request into a valid MySQL SELECT query.
-    Use only the provided table and columns.
-
-    Table: candidates
-    Columns: id, name, cgpa, skills, experience
-
-    After generating SQL, execute it by calling the `execute_sql` tool with the query string.
-    Return the results from the tool.
+    You are an expert in MongoDB.
+    Convert the recruiter’s request into a valid MongoDB find() query.
+    Use only the provided collection and fields.
+    After generating the query, call the `read_mongo` tool with the collection name and filter.
     """
 
 # ---------- TOOL ----------
-@mcp.tool("execute_sql")
-async def execute_sql(ctx: Context, sql: str):
-    """Safely executes SELECT queries."""
-    # Parse and validate only SELECT statements
-    parsed = sqlparse.parse(sql)
-    for stmt in parsed:
-        if stmt.get_type() != "SELECT":
-            raise ValueError("❌ Only SELECT queries are allowed.")
+@mcp.tool("read_mongo")
+def read_mongo(ctx: Context, collection_name: str, filter_query: Optional[Dict[str, Any]] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Reads data from a MongoDB collection.
+    
+    Args:
+        collection_name (str): MongoDB collection name
+        filter_query (dict, optional): MongoDB filter query
+        limit (int): Max number of documents
 
-    # Use global engine
-    global engine
+    Returns:
+        List[Dict]: List of documents
+    """
+    if filter_query is None:
+        filter_query = {}
 
-    async with engine.connect() as conn:
-        result = await conn.execute(text(sql))
-        rows = result.fetchall()
-        cols = result.keys()
+    collection = db[collection_name]
+    results = list(collection.find(filter_query).limit(limit))
 
-    return {"columns": cols, "rows": [dict(zip(cols, r)) for r in rows]}
+    # Convert ObjectId to string
+    for doc in results:
+        doc["_id"] = str(doc["_id"])
 
+    return results
 
-@mcp.tool("create_user")
-async def execute_sql(ctx: Context, sql: str):
-    # Use global engine
-    global engine
+# ---------- TOOL 2: Insert document ----------
+class MongoDoc(BaseModel):
+    data: Dict[str, Any]
+    collection_name: str
 
-    async with engine.connect() as conn:
-        result = await conn.execute(text(sql))
-        rows = result.fetchall()
-        cols = result.keys()
+@mcp.tool("insert_mongo")
+def insert_mongo(ctx: Context, doc: MongoDoc):
+    """
+    Insert a document into MongoDB
+    """
+    collection = db[doc.collection_name]
+    result = collection.insert_one(doc.data)
+    return {"_id": str(result.inserted_id), "message": "Document inserted successfully"}
 
-    return {"columns": cols, "rows": [dict(zip(cols, r)) for r in rows]}
-
-# ---------- RUN MCP (optional standalone) ----------
-# if __name__ == "__main__":
-#     print("🚀 MCP Database Server running on http://localhost:10000")
-#     mcp.serve(host="0.0.0.0", port=10000)
+# ---------- RUN MCP ----------
+if __name__ == "__main__":
+    print("🚀 MCP MongoDB Server running on http://localhost:10000")
+    mcp.serve(host="0.0.0.0", port=10000)
