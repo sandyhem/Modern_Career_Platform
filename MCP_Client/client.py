@@ -3,11 +3,14 @@ import json
 import asyncio
 import os
 import httpx
+from datetime import datetime
+
 from fastapi import Body, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Annotated
+from typing import Dict, List, Optional
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -494,7 +497,7 @@ async def get_codeforces_score(username: str):
                 }
 
 
-@app.get("/codeprofiles/{username}/leetcodescore")
+@app.get("/leetcode/{username}")
 async def get_leetcode_score(username: str):
     async with streamablehttp_client("http://localhost:10000/evaluate/mcp") as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
@@ -510,9 +513,8 @@ async def get_leetcode_score(username: str):
             # Call the tool
             response = await session.call_tool(
                 tool_name,
-                {"leetcode_username": username}
+                {"username": username}
             )
-
             # Access attributes properly (not subscripting)
             if response.isError:
                 return {"error": "Tool returned an error", "details": response}
@@ -605,7 +607,7 @@ async def evaluate_job_description(
                     {
                         "username": username, 
                         "job_description": final_output
-                    }  # your tool input params
+                    }  
                 )
                 # ✅ Access attributes properly (not subscripting)
                 if response.isError:
@@ -636,7 +638,7 @@ async def evaluate_job_description(
          
                 })
 
-from typing import Optional, List
+
 
 client = MongoClient("mongodb://localhost:27017/")
 db = client["studentDB"]
@@ -655,6 +657,8 @@ class Student(BaseModel):
     leetcode_username: str
     codeforces_username: Optional[str] = None
     linkedin_username: str
+    phone_number: str
+    email:str
     resume_url: str
 
 class StudentOut(BaseModel):
@@ -671,6 +675,8 @@ class StudentOut(BaseModel):
     leetcode_username: str
     codeforces_username: Optional[str] = None
     linkedin_username: str
+    phone_number: str
+    email:str
     resume_url: str
 
 def student_serializer(student) -> dict:
@@ -688,6 +694,8 @@ def student_serializer(student) -> dict:
         "leetcode_username": student["leetcode_username"],
         "codeforces_username": student.get("codeforces_username"),
         "linkedin_username": student["linkedin_username"],
+        "phone_number": student["phone_number"],
+        "email": student["email"],
         "resume_url": student["resume_url"]
     }
 
@@ -722,6 +730,236 @@ def delete_student(student_id: str):
         raise HTTPException(status_code=404, detail="Student not found")
     return {"message": "Student deleted successfully"}
 
+
+# ------------------------------
+# Pydantic Models
+# ------------------------------
+recruitment_db = client["recruitmentDB"]
+job_applicants_collection = recruitment_db["jobapplicants"]
+
+# ------------------------------
+# Models
+# ------------------------------
+class GithubActivity(BaseModel):
+    total_repos: Optional[int]
+    total_stars: Optional[int]
+    total_forks: Optional[int]
+    total_commits: Optional[int]
+
+class Github(BaseModel):
+    username: Optional[str]
+    job_description_preview: Optional[str]
+    languages: Optional[Dict[str, int]]
+    matched_keywords: Optional[List[str]]
+    github_activity: Optional[GithubActivity]
+    commit_factor: Optional[float]
+    match_score: Optional[float]
+    compatibility_score: Optional[float]
+
+class LeetCodeProblems(BaseModel):
+    Total: Optional[int]
+    Easy: Optional[int]
+    Medium: Optional[int]
+    Hard: Optional[int]
+    AcceptanceRate: Optional[str]
+
+class LeetCodeContest(BaseModel):
+    AttendedContests: Optional[int]
+
+class LeetCodeBadge(BaseModel):
+    id: Optional[str]
+    name: Optional[str]
+    icon: Optional[str]
+    earnedOn: Optional[str]
+
+class LeetCode(BaseModel):
+    username: Optional[str]
+    country: Optional[str]
+    ranking: Optional[int]
+    problemsSolved: Optional[LeetCodeProblems]
+    contestStats: Optional[LeetCodeContest]
+    badges: Optional[List[LeetCodeBadge]]
+
+class CodeforcesDetails(BaseModel):
+    lastName: Optional[str]
+    country: Optional[str]
+    city: Optional[str]
+    rating: Optional[int]
+    rank: Optional[str]
+    maxRating: Optional[int]
+    maxRank: Optional[str]
+
+class Codeforces(BaseModel):
+    handle: Optional[str]
+    codeforces_details: Optional[CodeforcesDetails]
+
+class JobApplicant(BaseModel):
+    jobId: int
+    studentId: int
+    github: Optional[Github]
+    leetcode: Optional[LeetCode]
+    codeforces: Optional[Codeforces]
+
+# ------------------------------
+# Serializer
+# ------------------------------
+def applicant_serializer(applicant) -> dict:
+    return {
+        "id": str(applicant["_id"]),
+        "jobId": applicant["jobId"],
+        "studentId": applicant["studentId"],
+        "github": applicant.get("github"),
+        "leetcode": applicant.get("leetcode"),
+        "codeforces": applicant.get("codeforces"),
+    }
+
+# ------------------------------
+# CRUD Endpoints
+# ------------------------------
+
+@app.post("/jobapplicants")
+def create_job_applicant(applicant: JobApplicant):
+    """Create a new job applicant"""
+    result = job_applicants_collection.insert_one(applicant.dict())
+    return {"id": str(result.inserted_id), "message": "Job applicant created successfully"}
+
+@app.get("/jobapplicants", response_model=List[dict])
+def get_all_job_applicants():
+    """Get all job applicants"""
+    applicants = job_applicants_collection.find()
+    return [applicant_serializer(a) for a in applicants]
+
+@app.get("/jobapplicants/{applicant_id}")
+def get_job_applicant(applicant_id: str):
+    """Get a specific job applicant"""
+    applicant = job_applicants_collection.find_one({"_id": ObjectId(applicant_id)})
+    if not applicant:
+        raise HTTPException(status_code=404, detail="Job applicant not found")
+    return applicant_serializer(applicant)
+
+@app.put("/jobapplicants/{applicant_id}")
+def update_job_applicant(applicant_id: str, applicant: JobApplicant):
+    """Update job applicant details"""
+    result = job_applicants_collection.update_one(
+        {"_id": ObjectId(applicant_id)}, {"$set": applicant.dict()}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Job applicant not found")
+    return {"message": "Job applicant updated successfully"}
+
+@app.delete("/jobapplicants/{applicant_id}")
+def delete_job_applicant(applicant_id: str):
+    """Delete job applicant"""
+    result = job_applicants_collection.delete_one({"_id": ObjectId(applicant_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Job applicant not found")
+    return {"message": "Job applicant deleted successfully"}
+class GithubActivity(BaseModel):
+    total_repos: Optional[int]
+    total_stars: Optional[int]
+    total_forks: Optional[int]
+    total_commits: Optional[int]
+
+class Github(BaseModel):
+    username: Optional[str]
+    job_description_preview: Optional[str]
+    languages: Optional[Dict[str, int]]
+    matched_keywords: Optional[List[str]]
+    github_activity: Optional[GithubActivity]
+    commit_factor: Optional[float]
+    match_score: Optional[float]
+    compatibility_score: Optional[float]
+
+class LeetcodeProblems(BaseModel):
+    Total: Optional[int]
+    Easy: Optional[int]
+    Medium: Optional[int]
+    Hard: Optional[int]
+    AcceptanceRate: Optional[str]
+
+class LeetcodeContestStats(BaseModel):
+    AttendedContests: Optional[int]
+
+class LeetcodeBadge(BaseModel):
+    id: Optional[str]
+    name: Optional[str]
+    icon: Optional[str]
+    earnedOn: Optional[str]
+
+class Leetcode(BaseModel):
+    username: Optional[str]
+    country: Optional[str]
+    ranking: Optional[int]
+    problemsSolved: Optional[LeetcodeProblems]
+    contestStats: Optional[LeetcodeContestStats]
+    badges: Optional[List[LeetcodeBadge]]
+
+class CodeforcesDetails(BaseModel):
+    lastName: Optional[str]
+    country: Optional[str]
+    city: Optional[str]
+    rating: Optional[int]
+    rank: Optional[str]
+    maxRating: Optional[int]
+    maxRank: Optional[str]
+
+class Codeforces(BaseModel):
+    handle: Optional[str]
+    codeforces_details: Optional[CodeforcesDetails]
+
+class JobApplicant(BaseModel):
+    jobId: int = Field(..., description="Job ID reference")
+    studentId: int = Field(..., description="Student ID reference")
+    github: Optional[Github]
+    leetcode: Optional[Leetcode]
+    codeforces: Optional[Codeforces]
+
+# Helper: convert ObjectId
+def serialize_doc(doc):
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+jobApplicant_db = client["recruitmentDB"]
+jobs_collectionthree = jobApplicant_db ["jobapplicants"]
+
+# CREATE
+@app.post("/jobapplicants", response_model=JobApplicant)
+def create_job_applicant(applicant: JobApplicant):
+    result = jobs_collectionthree.insert_one(applicant.dict())
+    new_doc =jobs_collectionthree.find_one({"_id": result.inserted_id})
+    return serialize_doc(new_doc)
+
+# READ ALL
+@app.get("/jobapplicants")
+def get_all_job_applicants():
+    docs = jobs_collectionthree.find().to_list(100)
+    return [serialize_doc(doc) for doc in docs]
+
+# READ ONE
+@app.get("/jobapplicants/{id}")
+def get_job_applicant(id: str):
+    doc = jobs_collectionthree.find_one({"_id": ObjectId(id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    return serialize_doc(doc)
+
+# UPDATE
+@app.put("/jobapplicants/{id}")
+def update_job_applicant(id: str, applicant: JobApplicant):
+    update_data = {k: v for k, v in applicant.dict().items() if v is not None}
+    result = jobs_collectionthree.update_one({"_id": ObjectId(id)}, {"$set": update_data})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    updated = jobs_collectionthree.find_one({"_id": ObjectId(id)})
+    return serialize_doc(updated)
+
+# DELETE
+@app.delete("/jobapplicants/{id}")
+def delete_job_applicant(id: str):
+    result = jobs_collectionthree.delete_one({"_id": ObjectId(id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Applicant not found")
+    return {"message": "Applicant deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
