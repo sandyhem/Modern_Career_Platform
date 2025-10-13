@@ -5,15 +5,18 @@ import os
 import httpx
 from datetime import datetime
 
-from fastapi import Body, FastAPI, Query
+from fastapi import Body, FastAPI, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, Field, EmailStr
 from typing import Annotated
 from typing import Dict, List, Optional
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
 from fastapi import HTTPException
 from bson import ObjectId
 from pymongo import MongoClient
@@ -643,8 +646,28 @@ async def evaluate_job_description(
 client = MongoClient("mongodb://localhost:27017/")
 db = client["studentDB"]
 students_collection = db["students"]
+register_students_collection=db["auth_student"]
 
+SECRET_KEY = os.getenv('SECRET_KEY','defaultsecretkey')
+ALGORITHM = os.getenv('ALGORITHM','HS256')
+EXPIRY = os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES',60)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+class RegisterStudent(BaseModel):
+    username:str
+    email:str
+    password:str
+    usertype:str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+    
 class Student(BaseModel):
+    sid:str
     name: str
     regno: str
     degree: str
@@ -662,7 +685,7 @@ class Student(BaseModel):
     resume_url: str
 
 class StudentOut(BaseModel):
-    id: str
+    sid: str
     name: str
     regno: str
     degree: str
@@ -698,6 +721,83 @@ def student_serializer(student) -> dict:
         "email": student["email"],
         "resume_url": student["resume_url"]
     }
+
+def hash_password(password: str):
+    return pwd_context.hash(password)
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now() + expires_delta
+    else:
+        expire = datetime.now() + timedelta(minutes=EXPIRY)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def get_student_by_email(email: str):
+    return register_students_collection.find_one({"email": email})
+
+def authenticate_student(email: str, password: str):
+    student = get_student_by_email(email)
+    if not student:
+        return False
+    if not verify_password(password, student["password"]):
+        return False
+    return student
+
+# ---------------- Signup ----------------
+@app.post("/signup",tags=["auth"])
+def signup(student: RegisterStudent):
+    if get_student_by_email(student.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    #print(student.password)
+    hashed_password = hash_password(student.password)
+    student_dict = student.model_dump()
+    student_dict["password"] = hashed_password
+    register_students_collection.insert_one(student_dict)
+    access_token = create_access_token(data={"sub": student.email})
+    student_details=get_student_by_email(student.email)
+    if "_id" in student_details:
+        student_details["_id"] = str(student_details["_id"]) 
+    return {"message": "Student registered successfully","access_token":access_token,"user":student_details}
+
+# ---------------- Login ----------------
+class LoginRequest(BaseModel):
+    username:str
+    password:str
+    
+@app.post("/login", response_model=Token,tags=["auth"])
+def login(form_data: LoginRequest):
+    student = authenticate_student(form_data.username, form_data.password)
+    if not student:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    student_details=get_student_by_email(form_data.username)
+    print(student_details)
+    if "_id" in student_details:
+        student_details["_id"] = str(student_details["_id"]) 
+    access_token = create_access_token(data={"sub": student["email"]})
+    return {"access_token": access_token, "token_type": "bearer", "user": student_details}
+
+# ---------------- Protected Route Example ----------------
+@app.get("/profile")
+def read_profile(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    student = get_student_by_email(email)
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    return student
 
 @app.post("/students")
 def create_student(student: Student):
@@ -854,114 +954,9 @@ def delete_job_applicant(applicant_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Job applicant not found")
     return {"message": "Job applicant deleted successfully"}
-class GithubActivity(BaseModel):
-    total_repos: Optional[int]
-    total_stars: Optional[int]
-    total_forks: Optional[int]
-    total_commits: Optional[int]
-
-class Github(BaseModel):
-    username: Optional[str]
-    job_description_preview: Optional[str]
-    languages: Optional[Dict[str, int]]
-    matched_keywords: Optional[List[str]]
-    github_activity: Optional[GithubActivity]
-    commit_factor: Optional[float]
-    match_score: Optional[float]
-    compatibility_score: Optional[float]
-
-class LeetcodeProblems(BaseModel):
-    Total: Optional[int]
-    Easy: Optional[int]
-    Medium: Optional[int]
-    Hard: Optional[int]
-    AcceptanceRate: Optional[str]
-
-class LeetcodeContestStats(BaseModel):
-    AttendedContests: Optional[int]
-
-class LeetcodeBadge(BaseModel):
-    id: Optional[str]
-    name: Optional[str]
-    icon: Optional[str]
-    earnedOn: Optional[str]
-
-class Leetcode(BaseModel):
-    username: Optional[str]
-    country: Optional[str]
-    ranking: Optional[int]
-    problemsSolved: Optional[LeetcodeProblems]
-    contestStats: Optional[LeetcodeContestStats]
-    badges: Optional[List[LeetcodeBadge]]
-
-class CodeforcesDetails(BaseModel):
-    lastName: Optional[str]
-    country: Optional[str]
-    city: Optional[str]
-    rating: Optional[int]
-    rank: Optional[str]
-    maxRating: Optional[int]
-    maxRank: Optional[str]
-
-class Codeforces(BaseModel):
-    handle: Optional[str]
-    codeforces_details: Optional[CodeforcesDetails]
-
-class JobApplicant(BaseModel):
-    jobId: int = Field(..., description="Job ID reference")
-    studentId: int = Field(..., description="Student ID reference")
-    github: Optional[Github]
-    leetcode: Optional[Leetcode]
-    codeforces: Optional[Codeforces]
-
-# Helper: convert ObjectId
-def serialize_doc(doc):
-    doc["_id"] = str(doc["_id"])
-    return doc
-
-jobApplicant_db = client["recruitmentDB"]
-jobs_collectionthree = jobApplicant_db ["jobapplicants"]
-
-# CREATE
-@app.post("/jobapplicants", response_model=JobApplicant)
-def create_job_applicant(applicant: JobApplicant):
-    result = jobs_collectionthree.insert_one(applicant.dict())
-    new_doc =jobs_collectionthree.find_one({"_id": result.inserted_id})
-    return serialize_doc(new_doc)
-
-# READ ALL
-@app.get("/jobapplicants")
-def get_all_job_applicants():
-    docs = jobs_collectionthree.find().to_list(100)
-    return [serialize_doc(doc) for doc in docs]
-
-# READ ONE
-@app.get("/jobapplicants/{id}")
-def get_job_applicant(id: str):
-    doc = jobs_collectionthree.find_one({"_id": ObjectId(id)})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Applicant not found")
-    return serialize_doc(doc)
-
-# UPDATE
-@app.put("/jobapplicants/{id}")
-def update_job_applicant(id: str, applicant: JobApplicant):
-    update_data = {k: v for k, v in applicant.dict().items() if v is not None}
-    result = jobs_collectionthree.update_one({"_id": ObjectId(id)}, {"$set": update_data})
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Applicant not found")
-    updated = jobs_collectionthree.find_one({"_id": ObjectId(id)})
-    return serialize_doc(updated)
-
-# DELETE
-@app.delete("/jobapplicants/{id}")
-def delete_job_applicant(id: str):
-    result = jobs_collectionthree.delete_one({"_id": ObjectId(id)})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Applicant not found")
-    return {"message": "Applicant deleted successfully"}
 
 if __name__ == "__main__":
+    
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000,reload=True)
