@@ -436,3 +436,4 @@ async def analyze_candidate(username: str, job_description: str):
             "match_score":match_score,
             "compatibility_score": compatibility_score
         }
+
