@@ -706,13 +706,14 @@ def get_all_job_applicants():
     applicants = job_applicants_collection.find()
     return [applicant_serializer(a) for a in applicants]
 
-@app.get("/jobapplicants/{applicant_id}")
-def get_job_applicant(applicant_id: str):
-    """Get a specific job applicant"""
-    applicant = job_applicants_collection.find_one({"_id": ObjectId(applicant_id)})
-    if not applicant:
-        raise HTTPException(status_code=404, detail="Job applicant not found")
-    return applicant_serializer(applicant)
+@app.get("/jobapplicants/{job_id}")
+def get_job_applicants_by_jobid(job_id: str):
+    """Get all job applicants for a specific jobId"""
+    applicants = job_applicants_collection.find({"jobId": job_id})
+    result = [applicant_serializer(a) for a in applicants]
+    if not result:
+        raise HTTPException(status_code=404, detail="No applicants found for this jobId")
+    return result
 
 @app.put("/jobapplicants/{applicant_id}")
 def update_job_applicant(applicant_id: str, applicant: JobApplicant):
