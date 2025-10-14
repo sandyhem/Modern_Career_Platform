@@ -1,373 +1,312 @@
 """
-university_server.py
-Backend server for University Student Verification Portal
-Handles Excel upload and stores data in MySQL database
+resume_matcher_backend.py
+Backend API for Resume-based Job Matching with Gemini AI
+Add these endpoints to your existing FastAPI application
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Text, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime
-import pandas as pd
-import io
+from pydantic import BaseModel
+from typing import List, Optional
+import google.generativeai as genai
 import os
+import PyPDF2
+import docx
+import io
+import json
+import re
 
-# ==================== DATABASE SETUP ====================
-DATABASE_URL = os.getenv(
-    "MYSQL_URL",
-    "mysql+pymysql://root:root@localhost:3306/universityDB"
-)
 
+from dotenv import load_dotenv
+load_dotenv()
 
-engine = create_engine(DATABASE_URL, echo=False)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# Configure Gemini AI
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# ==================== DATABASE MODELS ====================
-class StudentVerificationDB(Base):
-    __tablename__ = "student_verifications"
-    
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    register_number = Column(String(50), unique=True, index=True, nullable=False)
-    name = Column(String(100), nullable=False)
-    department = Column(String(100), nullable=False)
-    year_of_study = Column(Integer, nullable=False)
-    cgpa = Column(Float, nullable=False)
-    total_backlogs = Column(Integer, default=0)
-    current_arrears = Column(Integer, default=0)
-    history_of_arrears = Column(Boolean, default=False)
-    placement_eligible = Column(Boolean, default=False)
-    internships = Column(Text, nullable=True)  # Stored as JSON string
-    verification_status = Column(String(20), default="Pending")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# ==================== PYDANTIC MODELS ====================
-class StudentVerification(BaseModel):
-    register_number: str = Field(..., description="University register number")
-    name: str = Field(..., description="Full name of the student")
-    department: str = Field(..., description="Department of study")
-    year_of_study: int = Field(..., ge=1, le=4, description="Current year of study (1 to 4)")
-    cgpa: float = Field(..., ge=0.0, le=10.0, description="Cumulative Grade Point Average")
-    total_backlogs: int = Field(0, ge=0, description="Total number of past backlogs cleared")
-    current_arrears: int = Field(0, ge=0, description="Number of arrears currently uncleared")
-    history_of_arrears: bool = Field(False, description="True if the student had arrears anytime")
-    placement_eligible: bool = Field(False, description="Whether the student meets eligibility criteria for placement")
-    internships: Optional[List[str]] = Field(default_factory=list, description="Internships completed by the student")
-    verification_status: str = Field("Pending", description="Status of verification - Pending / Verified / Rejected")
-
-class StudentVerificationResponse(StudentVerification):
-    id: int
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-class UploadResponse(BaseModel):
-    success: bool
-    message: str
-    records_added: int
-    records_updated: int
-    errors: List[str] = []
-
-class UpdateStatusRequest(BaseModel):
-    verification_status: str = Field(..., description="New status: Pending / Verified / Rejected")
-
-# ==================== FASTAPI APP ====================
-app = FastAPI(
-    title="University Student Verification Portal",
-    description="API for managing student verification data",
-    version="1.0.0"
-)
+app = FastAPI()
 
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ==================== DATABASE DEPENDENCY ====================
-def get_db():
-    db = SessionLocal()
+# ==================== MODELS ====================
+class ResumeTextResponse(BaseModel):
+    text: str
+    filename: str
+
+class ResumeAnalysisRequest(BaseModel):
+    resume_text: str
+
+class ResumeAnalysisResponse(BaseModel):
+    keywords: List[str]
+    skills: List[str]
+    experience: str
+    summary: str
+    education: Optional[str] = None
+    certifications: Optional[List[str]] = None
+
+# ==================== HELPER FUNCTIONS ====================
+def extract_text_from_pdf(file_content: bytes) -> str:
+    """Extract text from PDF file"""
     try:
-        yield db
-    finally:
-        db.close()
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text.strip()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading PDF: {str(e)}")
+
+def extract_text_from_docx(file_content: bytes) -> str:
+    """Extract text from Word document"""
+    try:
+        doc = docx.Document(io.BytesIO(file_content))
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        return text.strip()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading Word document: {str(e)}")
+
+def parse_gemini_response(response_text: str) -> dict:
+    """Parse Gemini's response and extract structured data"""
+    try:
+        # Try to parse as JSON first
+        if "{" in response_text and "}" in response_text:
+            json_start = response_text.find("{")
+            json_end = response_text.rfind("}") + 1
+            json_str = response_text[json_start:json_end]
+            return json.loads(json_str)
+        
+        # Fallback: Extract using regex patterns
+        data = {
+            "keywords": [],
+            "skills": [],
+            "experience": "",
+            "summary": "",
+            "education": "",
+            "certifications": []
+        }
+        
+        # Extract keywords
+        keywords_match = re.search(r'(?:keywords?|key\s*words?):\s*\[?([^\]]+)\]?', response_text, re.IGNORECASE)
+        if keywords_match:
+            keywords_text = keywords_match.group(1)
+            data["keywords"] = [k.strip().strip('"\'') for k in keywords_text.split(',')]
+        
+        # Extract skills
+        skills_match = re.search(r'(?:skills?):\s*\[?([^\]]+)\]?', response_text, re.IGNORECASE)
+        if skills_match:
+            skills_text = skills_match.group(1)
+            data["skills"] = [s.strip().strip('"\'') for s in skills_text.split(',')]
+        
+        # Extract experience
+        exp_match = re.search(r'(?:experience|experience\s*level):\s*["\']?([^"\'\\n]+)["\']?', response_text, re.IGNORECASE)
+        if exp_match:
+            data["experience"] = exp_match.group(1).strip()
+        
+        # Extract summary
+        summary_match = re.search(r'(?:summary|professional\s*summary):\s*["\']?([^"\']+)["\']?', response_text, re.IGNORECASE)
+        if summary_match:
+            data["summary"] = summary_match.group(1).strip()
+        
+        return data
+        
+    except Exception as e:
+        print(f"Error parsing Gemini response: {e}")
+        # Return basic structure with whatever we can extract
+        return {
+            "keywords": [],
+            "skills": [],
+            "experience": "Not specified",
+            "summary": response_text[:200] if response_text else "",
+            "education": "",
+            "certifications": []
+        }
 
 # ==================== ENDPOINTS ====================
 
-@app.get("/")
-def root():
-    return {
-        "message": "University Student Verification Portal API",
-        "endpoints": {
-            "upload": "/upload-excel",
-            "students": "/students",
-            "student_by_regno": "/students/{register_number}",
-            "update_status": "/students/{register_number}/status",
-            "stats": "/stats"
-        }
-    }
-
-@app.post("/upload-excel", response_model=UploadResponse)
-async def upload_excel(file: UploadFile = File(...)):
+@app.post("/extract-resume-text", response_model=ResumeTextResponse)
+async def extract_resume_text(resume: UploadFile = File(...)):
     """
-    Upload Excel file with student verification data.
-    Expected columns: register_number, name, department, year_of_study, cgpa, 
-                     total_backlogs, current_arrears, history_of_arrears, 
-                     placement_eligible, internships, verification_status
+    Extract text content from uploaded resume (PDF or Word)
     """
-    if not file.filename.endswith(('.xlsx', '.xls')):
-        raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are allowed")
+    if not resume.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+    
+    # Check file type
+    file_extension = resume.filename.lower().split('.')[-1]
+    
+    if file_extension not in ['pdf', 'doc', 'docx']:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and Word documents are supported"
+        )
     
     try:
-        # Read Excel file
-        contents = await file.read()
-        df = pd.read_excel(io.BytesIO(contents))
+        # Read file content
+        file_content = await resume.read()
         
-        # Validate required columns
-        required_columns = ['register_number', 'name', 'department', 'year_of_study', 'cgpa']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
+        # Extract text based on file type
+        if file_extension == 'pdf':
+            text = extract_text_from_pdf(file_content)
+        elif file_extension in ['doc', 'docx']:
+            text = extract_text_from_docx(file_content)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+        
+        if not text or len(text.strip()) < 50:
             raise HTTPException(
-                status_code=400, 
-                detail=f"Missing required columns: {', '.join(missing_columns)}"
+                status_code=400,
+                detail="Could not extract sufficient text from resume. Please ensure the file is readable."
             )
         
-        db = next(get_db())
-        records_added = 0
-        records_updated = 0
-        errors = []
-        
-        for index, row in df.iterrows():
-            try:
-                # Parse internships (comma-separated string to list)
-                internships_str = str(row.get('internships', ''))
-                internships_list = [i.strip() for i in internships_str.split(',') if i.strip()]
-                
-                # Check if student already exists
-                existing = db.query(StudentVerificationDB).filter(
-                    StudentVerificationDB.register_number == str(row['register_number'])
-                ).first()
-                
-                if existing:
-                    # Update existing record
-                    existing.name = str(row['name'])
-                    existing.department = str(row['department'])
-                    existing.year_of_study = int(row['year_of_study'])
-                    existing.cgpa = float(row['cgpa'])
-                    existing.total_backlogs = int(row.get('total_backlogs', 0))
-                    existing.current_arrears = int(row.get('current_arrears', 0))
-                    existing.history_of_arrears = bool(row.get('history_of_arrears', False))
-                    existing.placement_eligible = bool(row.get('placement_eligible', False))
-                    existing.internships = ','.join(internships_list) if internships_list else None
-                    existing.verification_status = str(row.get('verification_status', 'Pending'))
-                    existing.updated_at = datetime.utcnow()
-                    records_updated += 1
-                else:
-                    # Create new record
-                    new_student = StudentVerificationDB(
-                        register_number=str(row['register_number']),
-                        name=str(row['name']),
-                        department=str(row['department']),
-                        year_of_study=int(row['year_of_study']),
-                        cgpa=float(row['cgpa']),
-                        total_backlogs=int(row.get('total_backlogs', 0)),
-                        current_arrears=int(row.get('current_arrears', 0)),
-                        history_of_arrears=bool(row.get('history_of_arrears', False)),
-                        placement_eligible=bool(row.get('placement_eligible', False)),
-                        internships=','.join(internships_list) if internships_list else None,
-                        verification_status=str(row.get('verification_status', 'Pending'))
-                    )
-                    db.add(new_student)
-                    records_added += 1
-                
-            except Exception as e:
-                errors.append(f"Row {index + 2}: {str(e)}")
-        
-        db.commit()
-        
-        return UploadResponse(
-            success=True,
-            message=f"Excel processed successfully",
-            records_added=records_added,
-            records_updated=records_updated,
-            errors=errors
+        return ResumeTextResponse(
+            text=text,
+            filename=resume.filename
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing Excel file: {str(e)}")
-
-@app.get("/students", response_model=List[StudentVerificationResponse])
-def get_all_students(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
-    department: Optional[str] = None,
-    verification_status: Optional[str] = None,
-    placement_eligible: Optional[bool] = None
-):
-    """Get all students with optional filters"""
-    db = next(get_db())
-    
-    query = db.query(StudentVerificationDB)
-    
-    if department:
-        query = query.filter(StudentVerificationDB.department == department)
-    if verification_status:
-        query = query.filter(StudentVerificationDB.verification_status == verification_status)
-    if placement_eligible is not None:
-        query = query.filter(StudentVerificationDB.placement_eligible == placement_eligible)
-    
-    students = query.offset(skip).limit(limit).all()
-    
-    # Convert internships string back to list
-    result = []
-    for student in students:
-        student_dict = {
-            "id": student.id,
-            "register_number": student.register_number,
-            "name": student.name,
-            "department": student.department,
-            "year_of_study": student.year_of_study,
-            "cgpa": student.cgpa,
-            "total_backlogs": student.total_backlogs,
-            "current_arrears": student.current_arrears,
-            "history_of_arrears": student.history_of_arrears,
-            "placement_eligible": student.placement_eligible,
-            "internships": student.internships.split(',') if student.internships else [],
-            "verification_status": student.verification_status,
-            "created_at": student.created_at,
-            "updated_at": student.updated_at
-        }
-        result.append(StudentVerificationResponse(**student_dict))
-    
-    return result
-
-@app.get("/students/{register_number}", response_model=StudentVerificationResponse)
-def get_student_by_regno(register_number: str):
-    """Get student by registration number"""
-    db = next(get_db())
-    
-    student = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.register_number == register_number
-    ).first()
-    
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    
-    student_dict = {
-        "id": student.id,
-        "register_number": student.register_number,
-        "name": student.name,
-        "department": student.department,
-        "year_of_study": student.year_of_study,
-        "cgpa": student.cgpa,
-        "total_backlogs": student.total_backlogs,
-        "current_arrears": student.current_arrears,
-        "history_of_arrears": student.history_of_arrears,
-        "placement_eligible": student.placement_eligible,
-        "internships": student.internships.split(',') if student.internships else [],
-        "verification_status": student.verification_status,
-        "created_at": student.created_at,
-        "updated_at": student.updated_at
-    }
-    
-    return StudentVerificationResponse(**student_dict)
-
-@app.put("/students/{register_number}/status")
-def update_verification_status(register_number: str, status_update: UpdateStatusRequest):
-    """Update verification status of a student"""
-    db = next(get_db())
-    
-    student = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.register_number == register_number
-    ).first()
-    
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    
-    valid_statuses = ["Pending", "Verified", "Rejected"]
-    if status_update.verification_status not in valid_statuses:
         raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            status_code=500,
+            detail=f"Error processing resume: {str(e)}"
+        )
+
+
+@app.post("/analyze-resume-gemini", response_model=ResumeAnalysisResponse)
+async def analyze_resume_with_gemini(request: ResumeAnalysisRequest):
+    """
+    Analyze resume text using Gemini AI to extract keywords, skills, and experience
+    """
+    if not request.resume_text or len(request.resume_text.strip()) < 50:
+        raise HTTPException(
+            status_code=400,
+            detail="Resume text is too short or empty"
         )
     
-    student.verification_status = status_update.verification_status
-    student.updated_at = datetime.utcnow()
-    db.commit()
-    
-    return {"message": f"Status updated to {status_update.verification_status}", "register_number": register_number}
+    try:
+        # Create Gemini prompt
+        prompt = f"""
+        You are an expert resume analyzer and career advisor. Analyze the following resume text and extract key information.
+        
+        RESUME TEXT:
+        {request.resume_text}
+        
+        Please provide a structured JSON response with the following fields:
+        
+        1. "keywords": A list of important keywords and technical terms found in the resume (15-25 keywords)
+        2. "skills": A list of technical skills, tools, and technologies (programming languages, frameworks, software, etc.)
+        3. "experience": A brief summary of the candidate's experience level (e.g., "Entry Level", "2-3 years", "Senior with 5+ years", etc.)
+        4. "summary": A brief professional summary of the candidate (2-3 sentences)
+        5. "education": Educational background (degree, institution, year)
+        6. "certifications": List of certifications or achievements mentioned
+        
+        Format your response as valid JSON that can be parsed. Be concise and focus on extracting actionable information for job matching.
+        
+        Example format:
+        {{
+          "keywords": ["Python", "Machine Learning", "Data Analysis", "SQL", "AWS"],
+          "skills": ["Python", "TensorFlow", "Pandas", "Docker", "Git"],
+          "experience": "Mid-level with 3-4 years of experience in data science",
+          "summary": "Data scientist with strong background in machine learning and statistical analysis. Experienced in building predictive models and working with large datasets.",
+          "education": "Master's in Computer Science, Stanford University, 2020",
+          "certifications": ["AWS Certified Solutions Architect", "Google Data Analytics Professional"]
+        }}
+        """
+        
+        # Call Gemini API
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        
+        if not response or not response.text:
+            raise HTTPException(
+                status_code=500,
+                detail="Gemini API returned empty response"
+            )
+        
+        # Parse Gemini response
+        parsed_data = parse_gemini_response(response.text)
+        
+        # Ensure we have at least some data
+        if not parsed_data.get("keywords") and not parsed_data.get("skills"):
+            # Fallback: Extract basic keywords from resume text
+            words = request.resume_text.lower().split()
+            common_skills = ['python', 'java', 'javascript', 'react', 'node', 'sql', 'aws', 
+                           'docker', 'kubernetes', 'git', 'machine learning', 'data science']
+            parsed_data["keywords"] = [skill for skill in common_skills if skill in ' '.join(words)]
+            parsed_data["skills"] = parsed_data["keywords"][:10]
+        
+        return ResumeAnalysisResponse(
+            keywords=parsed_data.get("keywords", [])[:25],
+            skills=parsed_data.get("skills", [])[:20],
+            experience=parsed_data.get("experience", "Not specified"),
+            summary=parsed_data.get("summary", ""),
+            education=parsed_data.get("education"),
+            certifications=parsed_data.get("certifications", [])
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing resume with Gemini: {str(e)}"
+        )
 
-@app.delete("/students/{register_number}")
-def delete_student(register_number: str):
-    """Delete a student record"""
-    db = next(get_db())
-    
-    student = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.register_number == register_number
-    ).first()
-    
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    
-    db.delete(student)
-    db.commit()
-    
-    return {"message": "Student record deleted successfully", "register_number": register_number}
-
-@app.get("/stats")
-def get_statistics():
-    """Get overall statistics"""
-    db = next(get_db())
-    
-    total_students = db.query(StudentVerificationDB).count()
-    verified = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.verification_status == "Verified"
-    ).count()
-    pending = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.verification_status == "Pending"
-    ).count()
-    rejected = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.verification_status == "Rejected"
-    ).count()
-    placement_eligible = db.query(StudentVerificationDB).filter(
-        StudentVerificationDB.placement_eligible == True
-    ).count()
-    
-    # Department-wise count
-    departments = db.query(
-        StudentVerificationDB.department,
-        db.func.count(StudentVerificationDB.id)
-    ).group_by(StudentVerificationDB.department).all()
-    
-    return {
-        "total_students": total_students,
-        "verified": verified,
-        "pending": pending,
-        "rejected": rejected,
-        "placement_eligible": placement_eligible,
-        "departments": {dept: count for dept, count in departments}
-    }
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "University Portal API"}
+    return {
+        "status": "ok",
+        "service": "Resume Matcher API",
+        "gemini_configured": bool(os.getenv("GOOGLE_API_KEY"))
+    }
 
 
-# ==================== RUN SERVER ====================
+# ==================== USAGE INSTRUCTIONS ====================
+"""
+SETUP INSTRUCTIONS:
+
+1. Install required packages:
+   pip install fastapi uvicorn PyPDF2 python-docx google-generativeai
+
+2. Set environment variable:
+   export GOOGLE_API_KEY="your-gemini-api-key"
+   
+   Windows:
+   set GOOGLE_API_KEY=your-gemini-api-key
+
+3. Run the server:
+   uvicorn resume_matcher_backend:app --reload --port 8001
+
+4. Test the endpoints:
+   - Upload resume: POST http://localhost:8001/extract-resume-text
+   - Analyze resume: POST http://localhost:8001/analyze-resume-gemini
+
+FRONTEND INTEGRATION:
+
+The frontend should:
+1. Upload resume file to /extract-resume-text to get text
+2. Send extracted text to /analyze-resume-gemini for AI analysis
+3. Use returned keywords and skills to match with jobs in your database
+
+EXAMPLE FLOW:
+1. User uploads resume.pdf
+2. POST to /extract-resume-text → get resume text
+3. POST to /analyze-resume-gemini with text → get keywords, skills, experience
+4. Frontend matches keywords with job descriptions
+5. Show ranked job recommendations to user
+"""
+
 if __name__ == "__main__":
     import uvicorn
-    print("🎓 University Portal Server starting on http://localhost:8001")
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    print("🚀 Resume Matcher Backend starting on http://localhost:8001")
+    print("📚 API Docs: http://localhost:8001/docs")
+    uvicorn.run(app, host="0.0.0.0", port=8001, reload=True)
