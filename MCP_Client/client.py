@@ -414,7 +414,6 @@ async def mongodb_query(request: QueryRequest):
 # ------------------------------
 client = MongoClient("mongodb://localhost:27017/")
 db = client["studentDB"]
-students_collection = db["students"]
 register_students_collection=db["auth_student"]
 
 SECRET_KEY = os.getenv('SECRET_KEY','defaultsecretkey')
@@ -474,7 +473,7 @@ class StudentOut(BaseModel):
 def student_serializer(student) -> dict:
     return {
         "id": str(student["_id"]),
-        "id": str(student["sid"]),
+        "sid": str(student["sid"]),  
         "name": student["name"],
         "regno": student["regno"],
         "degree": student["degree"],
@@ -491,6 +490,7 @@ def student_serializer(student) -> dict:
         "email": student["email"],
         "resume_url": student["resume_url"]
     }
+
 
 def hash_password(password: str):
     return pwd_context.hash(password)
@@ -569,6 +569,8 @@ def read_profile(token: str = Depends(oauth2_scheme)):
     
     return student
 
+students_collection = db["students"]
+
 @app.post("/students")
 def create_student(student: Student):
     result = students_collection.insert_one(student.dict())
@@ -581,7 +583,17 @@ def get_students():
 
 @app.get("/students/{student_id}", response_model=StudentOut)
 def get_student(student_id: str):
-    student = students_collection.find_one({"_id": ObjectId(student_id)})
+    # Try to fetch by MongoDB ObjectId first
+    try:
+        object_id = ObjectId(student_id)
+        student = students_collection.find_one({"_id": object_id})
+        if student:
+            return student_serializer(student)
+    except Exception:
+        pass  # Not a valid ObjectId, try by sid
+
+    # Fallback: fetch by sid field
+    student = students_collection.find_one({"sid": student_id})
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     return student_serializer(student)
@@ -708,13 +720,14 @@ def get_all_job_applicants():
     applicants = job_applicants_collection.find()
     return [applicant_serializer(a) for a in applicants]
 
-@app.get("/jobapplicants/{applicant_id}")
-def get_job_applicant(applicant_id: str):
-    """Get a specific job applicant"""
-    applicant = job_applicants_collection.find_one({"_id": ObjectId(applicant_id)})
-    if not applicant:
-        raise HTTPException(status_code=404, detail="Job applicant not found")
-    return applicant_serializer(applicant)
+@app.get("/jobapplicants/{job_id}")
+def get_job_applicants_by_jobid(job_id: str):
+    """Get all job applicants for a specific jobId"""
+    applicants = job_applicants_collection.find({"jobId": job_id})
+    result = [applicant_serializer(a) for a in applicants]
+    if not result:
+        raise HTTPException(status_code=404, detail="No applicants found for this jobId")
+    return result
 
 @app.put("/jobapplicants/{applicant_id}")
 def update_job_applicant(applicant_id: str, applicant: JobApplicant):
