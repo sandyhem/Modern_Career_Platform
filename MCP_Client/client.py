@@ -715,6 +715,15 @@ def get_job_applicants_by_jobid(job_id: str):
         raise HTTPException(status_code=404, detail="No applicants found for this jobId")
     return result
 
+@app.get("/jobapplicants/student/{student_id}")
+def get_job_applicants_by_studentid(student_id: str):
+    """Get all job applicants for a specific studentId"""
+    applicants = job_applicants_collection.find({"studentId": student_id})
+    result = [applicant_serializer(a) for a in applicants]
+    if not result:
+        raise HTTPException(status_code=404, detail="No applicants found for this studentId")
+    return result
+
 @app.put("/jobapplicants/{applicant_id}")
 def update_job_applicant(applicant_id: str, applicant: JobApplicant):
     """Update job applicant details"""
@@ -822,6 +831,155 @@ def delete_job(job_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job deleted successfully"}
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# This file contains the core logic to send emails to students
+
+def send_student_mail(receiver_email: str, selected: bool, feedback: str = ""):
+    """
+    Sends an email to the student notifying about their selection status.
+    
+    Args:
+        receiver_email (str): Student's email address
+        selected (bool): True if selected, False if not selected
+        feedback (str): Optional feedback if not selected
+    """
+    # 💡 Replace these with real credentials or use environment variables
+    SENDER_EMAIL = "harishma.k675@gmail.com"
+    SENDER_PASSWORD = "haif cnfx gapb jswc"  # use App Password if Gmail 2FA is on
+
+    # ✉ Define mail subject & body based on selection status
+    if selected:
+        subject = "🎉 Congratulations! You've been Selected"
+        body = f"""
+        Dear Student,
+
+        Congratulations! We are thrilled to inform you that you have been selected for the next stage.
+
+        Keep up your great work and prepare for the onboarding process.
+
+        Best Regards,  
+        Recruitment Team
+        """
+    else:
+        subject = "Feedback on Your Application"
+        body = f"""
+        Dear Student,
+
+        Thank you for applying. Although you were not selected this time, we appreciate your effort.
+        
+        Feedback: {feedback}
+
+        Keep improving, and we encourage you to apply again in the future.
+
+        Best Regards,  
+        Recruitment Team
+        """
+
+    # 🏗 Create the email message
+    msg = MIMEMultipart()
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = receiver_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        # 💌 Connect to Gmail SMTP
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.send_message(msg)
+        print(f"✅ Mail sent successfully to {receiver_email}")
+        return {"status": "success", "message": "Mail sent successfully"}
+    except Exception as e:
+        print(f"❌ Error sending mail: {e}")
+        return {"status": "error", "message": str(e)}
+                
+class MailRequest(BaseModel):
+    sid: str
+    email: str
+    selected: bool
+    feedback: str | None = None
+
+def jobdata(student_id: str):
+    """Get all job applicants for a specific studentId"""
+    applicants = job_applicants_collection.find({"studentId": student_id})
+    result = [applicant_serializer(a) for a in applicants]
+    if not result:
+        raise HTTPException(status_code=404, detail="No applicants found for this studentId")
+    return result
+
+@app.post("/notify_student", tags=["Recruiter"])
+async def notify_student(request: MailRequest):
+    """
+    Recruiter endpoint to send selection or feedback email.
+    """
+    # Step 2: Initialize Gemini LLM
+    """Get all job applicants for a specific studentId"""
+    print(request.sid)
+    applicants=jobdata(request.sid)
+    print(applicants)
+
+    load_dotenv()
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash",
+        temperature=0.3,
+        max_retries=2,
+        google_api_key=google_api_key,
+    )
+    tools ={}
+    # Step 3: Create LangGraph Agent
+    agent = create_react_agent(llm,tools)
+    print(applicants)
+
+    # Step 4: Build full prompt
+    full_prompt = f"""
+    {"Please provide constructive feedback for improvement based on the following applicant data." if not request.selected else "Congratulate the applicant for progressing to the next round."}
+    Give only the feedback text
+    Applicant Data:
+    {applicants}
+    """
+
+    print("📤 Sending query to Gemini...",applicants)
+
+    try:
+        # Step 5: Ask LLM to translate query
+        messages = [{"role": "user", "content": full_prompt}]
+        response = await agent.ainvoke({"messages": messages})
+
+        # Extract final text from agent
+        final_output = None
+        if isinstance(response, dict) and response.get("messages"):
+            last_msg = response["messages"][-1]
+            final_output = getattr(last_msg, "content", None) or (last_msg.get("content") if isinstance(last_msg, dict) else None)
+        if not final_output:
+            final_output = response.get("text") if isinstance(response, dict) else str(response)
+
+        print("LLM output:\n", final_output)
+
+    except Exception as e:
+        error_msg = f"Failed to run agent: {str(e)}"
+        print(f"❌ MongoDB Query failed: {error_msg}")
+        return JSONResponse(status_code=500, content={
+            "status": "error",
+            "message": error_msg
+        })
+
+    result = send_student_mail(
+        receiver_email=request.email,
+        selected=request.selected,
+        feedback=final_output or ""
+    )
+
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return {"message": "Mail sent successfully to student."}
 
 if __name__ == "__main__":
     
